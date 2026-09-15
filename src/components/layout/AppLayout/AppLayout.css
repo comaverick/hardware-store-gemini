@@ -1,0 +1,142 @@
+.app-layout {
+  min-height: 100vh;
+  background: var(--app-canvas-modern);
+}
+
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 1200;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--app-accent-strong);
+  color: var(--app-panel-raised);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  transform: translateY(-160%);
+  transition: transform var(--app-motion-fast) var(--app-ease-out);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* ========================================
+   MAIN CONTENT
+======================================== */
+
+.app-content {
+  min-height: 100vh;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: clip;
+  padding: 96px 32px calc(40px + var(--app-assistant-clearance));
+  transition: margin-left var(--app-motion-shell) var(--app-ease-out);
+}
+
+/* ========================================
+   SIDEBAR COLLAPSED
+======================================== */
+
+.app-content-collapsed {
+  margin-left: var(--app-sidebar-collapsed);
+}
+
+/* ========================================
+   SIDEBAR EXPANDED
+======================================== */
+
+.app-content-expanded {
+  margin-left: var(--app-sidebar-expanded);
+}
+
+/* POS has more glass compositing work, so keep its shell resize shorter and pre-warmed. */
+.app-layout-pos .sidebar,
+.app-layout-pos .app-content {
+  transition-duration: 210ms;
+}
+
+.app-layout-pos .sidebar {
+  will-change: width;
+}
+
+.app-layout-pos .app-content {
+  will-change: margin-left;
+}
+
+.app-layout-pos .topbar-branch {
+  border-color: var(--app-line);
+  background: var(--app-panel-translucent);
+  box-shadow: none;
+}
+
+.app-layout-pos .topbar-branch .branch-value {
+  color: var(--app-muted);
+  font-weight: 650;
+}
+
+/* ========================================
+   RESPONSIVE
+======================================== */
+
+@media (max-width: 768px) {
+  .app-content {
+    padding: 88px 20px calc(32px + var(--app-assistant-clearance-mobile));
+  }
+}
+
+@media (max-width: 480px) {
+  .app-content {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+}
+
+.app-sidebar-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 990;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: var(--app-glass-dark);
+  -webkit-backdrop-filter: blur(20px) saturate(125%);
+  backdrop-filter: blur(20px) saturate(125%);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--app-motion-scrim) var(--app-ease-out);
+}
+
+@media (max-width: 900px) {
+  .app-content-collapsed,
+  .app-content-expanded {
+    margin-left: 0;
+  }
+
+  .app-sidebar-scrim {
+    pointer-events: none;
+  }
+
+  .app-sidebar-scrim-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-content,
+  .skip-link,
+  .app-sidebar-scrim {
+    transition: none;
+  }
+
+  .app-sidebar-scrim {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

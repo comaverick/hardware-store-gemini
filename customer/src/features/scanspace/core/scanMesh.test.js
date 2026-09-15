@@ -1,0 +1,1398 @@
+import {
+  createRgbdKeyframe,
+  closestProjectiveDepthAgreement,
+  depthPosition,
+  filterDepth,
+  fillSmallMeshHoles,
+  fuseRgbdKeyframes,
+  gridIndex,
+  imageColorStatistics,
+  imageFocus,
+  imageSharpness,
+  overlapTextureColorScales,
+  sampleProjectiveDepth,
+  sampleLooksLikeVerticalPatch,
+  selectFusionKeyframes,
+  meshFragmentationIsUnacceptable,
+  meshOutsideRectangularRoomModel,
+  meshWallStructureDiagnostics,
+  measuredSurfaceQualityDiagnostics,
+  measuredSurfaceGapWarning,
+  measuredWallSectorQualityDiagnostics,
+  meshBridgeDiagnostics,
+  pruneUnsupportedMeshBridges,
+  stabilizeMeasuredHorizontalSurfaces,
+  stabilizeMeasuredWallSectors,
+  textureColorDifference,
+  textureProjectionStretch,
+  wallConsensusKeyframes,
+  projectWorld,
+} from "./fusion";
+import { Matrix4, PerspectiveCamera, Vector3 } from "three";
+import { unprojectDepth } from "./depth";
+
+function grid(depthAt = () => 0) {
+  const points = [];
+  for (let y = 0; y < 3; y++)
+    for (let x = 0; x < 3; x++)
+      points.push({
+        x: x * 0.08,
+        y: y * 0.08,
+        z: depthAt(x, y),
+        gridX: x,
+        gridY: y,
+        gridColumns: 3,
+        gridRows: 3,
+        color: [200, 100, 50],
+      });
+  return points;
+}
+
+const projection = new Float32Array([
+  1, 0, 0, 0,
+  0, 1, 0, 0,
+  0, 0, -1, -1,
+  0, 0, -0.2, 0,
+]);
+
+test("subpixel sampling preserves an oblique plane instead of depth steps", () => {
+  const columns = 32, rows = 24;
+  const exactDepth = (u, v) => 1 / (0.5 + 0.22 * (u - 0.5) + 0.08 * (v - 0.5));
+  const frame = { columns, rows, filteredDepth: new Float32Array(columns * rows) };
+  for (let y = 0; y < rows; y++)
+    for (let x = 0; x < columns; x++)
+      frame.filteredDepth[y * columns + x] = exactDepth((x + 0.5) / columns, (y + 0.5) / rows);
+  let oldError = 0, correctedError = 0;
+  for (let y = 1; y < rows - 2; y++)
+    for (let x = 1; x < columns - 2; x++) {
+      const u = (x + 0.91) / columns, v = (y + 0.83) / rows;
+      const expected = exactDepth(u, v);
+      oldError += Math.abs(frame.filteredDepth[gridIndex(frame, u, v)] - expected);
+      correctedError += Math.abs(sampleProjectiveDepth(frame, u, v) - expected);
+    }
+  expect(oldError).toBeGreaterThan(1);
+  expect(correctedError).toBeLessThan(oldError * 0.001);
+});
+
+test("subpixel sampling does not blend across an occlusion or missing depth", () => {
+  const frame = { columns: 2, rows: 2, filteredDepth: new Float32Array([1, 2, 1, 2]) };
+  expect(sampleProjectiveDepth(frame, 0.49, 0.5)).toBe(1);
+  expect(sampleProjectiveDepth(frame, 0.51, 0.5)).toBe(2);
+  frame.filteredDepth = new Float32Array([0, 2, 2, 2]);
+  expect(sampleProjectiveDepth(frame, 0.4, 0.4)).toBe(0);
+  expect(sampleProjectiveDepth(frame, 0.6, 0.4)).toBe(2);
+});
+
+test("texture visibility cannot jump from a measured foreground pixel to its background neighbor", () => {
+  const frame = {
+    columns: 3,
+    rows: 3,
+    filteredDepth: new Float32Array([
+      2, 2, 2,
+      2, 1, 2,
+      2, 2, 2,
+    ]),
+    measuredMask: new Uint8Array(9).fill(1),
+  };
+  expect(
+    closestProjectiveDepthAgreement(frame, { u: 0.5, v: 0.5, depth: 2 }),
+  ).toMatchObject({ depth: 1, difference: 1, radius: 0 });
+});
+
+test("texture visibility recovers a missing pixel only from a depth cluster", () => {
+  const frame = {
+    columns: 3,
+    rows: 3,
+    filteredDepth: new Float32Array([
+      0, 2, 0,
+      0, 0, 0,
+      0, 0, 0,
+    ]),
+    measuredMask: new Uint8Array([
+      0, 1, 0,
+      0, 0, 0,
+      0, 0, 0,
+    ]),
+  };
+  expect(
+    closestProjectiveDepthAgreement(frame, { u: 0.5, v: 0.5, depth: 2 }),
+  ).toBeNull();
+  frame.filteredDepth[3] = 2.01;
+  expect(
+    closestProjectiveDepthAgreement(frame, { u: 0.5, v: 0.5, depth: 2 }),
+  ).toBeNull();
+  frame.measuredMask[3] = 1;
+  expect(
+    closestProjectiveDepthAgreement(frame, { u: 0.5, v: 0.5, depth: 2 }),
+  ).toMatchObject({ difference: 0, depth: 2, support: 2 });
+});
+
+function planeKeyframe(
+  cameraX = 0,
+  withColor = true,
+  centerMissing = false,
+  phantomPatch = false,
+  surfaceDepth = 2,
+) {
+  const points = [];
+  for (let y = 0; y < 16; y++)
+    for (let x = 0; x < 16; x++) {
+      if (
+        (centerMissing === true && x >= 6 && x <= 9 && y >= 6 && y <= 9) ||
+        (centerMissing === "single" && x === 8 && y === 8)
+      )
+        continue;
+      const u = (x + 0.5) / 16;
+      const v = (y + 0.5) / 16;
+      const phantomDepth = typeof phantomPatch === "number" ? phantomPatch : 0.62;
+      const depth = phantomPatch && x < 5 && y < 5
+        ? phantomDepth
+        : surfaceDepth;
+      points.push({
+        x: cameraX + (u * 2 - 1) * depth,
+        y: (1 - v * 2) * depth,
+        z: -depth,
+        depth,
+        color: withColor ? [180, 120, 80] : undefined,
+        gridX: x,
+        gridY: y,
+        gridColumns: 16,
+        gridRows: 16,
+      });
+    }
+  const transform = new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    cameraX, 0, 0, 1,
+  ]);
+  return createRgbdKeyframe(points, {
+    columns: 16,
+    rows: 16,
+    projectionMatrix: projection,
+    transformMatrix: transform,
+    camera: { x: cameraX, y: 0, z: 0 },
+    colorImage: withColor
+      ? { data: new Uint8Array(8 * 8 * 4).fill(180), width: 8, height: 8, channels: 4 }
+      : null,
+  });
+}
+
+test("fusion thinning preserves every bounded color view before depth-only frames", () => {
+  const colorIndices = [4, 19, 37, 52];
+  const frames = Array.from({ length: 60 }, (_, index) => {
+    const transform = new Matrix4().makeRotationX(
+      ((index % 12) - 6) * 0.045,
+    );
+    transform.setPosition(index * 0.015, 1.6, 0);
+    return {
+      frameId: index,
+      transformMatrix: new Float32Array(transform.elements),
+      camera: new Float32Array([index * 0.015, 1.6, 0]),
+      timestamp: index * 400,
+      colorImage: colorIndices.includes(index)
+        ? new Uint8Array([120, 120, 120, 255])
+        : null,
+    };
+  });
+  const selected = selectFusionKeyframes(frames, 12);
+  expect(selected).toHaveLength(12);
+  expect(
+    colorIndices.every((frameId) =>
+      selected.some((frame) => frame.frameId === frameId),
+    ),
+  ).toBe(true);
+});
+
+test("stores a compact transferable RGB-D keyframe instead of a frame mesh", () => {
+  const frame = createRgbdKeyframe(grid(), {
+    columns: 3,
+    rows: 3,
+    projectionMatrix: Array(16).fill(0),
+    transformMatrix: Array(16).fill(0),
+    camera: { x: 1, y: 2, z: 3 },
+    timestamp: 42,
+    colorSharpness: 18,
+    colorClippedRatio: 0.12,
+  });
+  expect(frame.validCount).toBe(9);
+  expect(frame.positions).toHaveLength(27);
+  expect(frame.depths).toHaveLength(9);
+  expect(frame.camera).toEqual(new Float32Array([1, 2, 3]));
+  expect(frame.colorSharpness).toBe(18);
+  expect(frame.colorClippedRatio).toBeCloseTo(0.12);
+  expect(frame.timestamp).toBe(42);
+});
+
+test("keeps a moving depth keyframe without storing its blurred colors", () => {
+  const frame = createRgbdKeyframe(grid(() => -2), {
+    columns: 3,
+    rows: 3,
+    projectionMatrix: projection,
+    transformMatrix: new Float32Array([
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ]),
+    colorImage: {
+      data: new Uint8Array(4 * 4 * 4).fill(180),
+      width: 4,
+      height: 4,
+      channels: 4,
+    },
+    keepColor: false,
+  });
+  expect(frame).not.toBeNull();
+  expect(frame.validCount).toBe(9);
+  expect(frame.coloredCount).toBe(0);
+  expect(frame.colorImage).toBeNull();
+  expect([...frame.colorMask].every((value) => value === 0)).toBe(true);
+});
+
+test("returns a safe no-mesh result when depth coverage is too small", () => {
+  const result = fuseRgbdKeyframes([], { floorY: 0 });
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.reason).toMatch(/required|Not enough/i);
+});
+
+test("retains a real depth edge supported by two agreeing neighbors", () => {
+  const depths = new Float32Array(25);
+  [2, 7, 12, 17, 22].forEach((index) => {
+    depths[index] = 2;
+  });
+  const result = filterDepth({ columns: 5, rows: 5, depths });
+  expect(result.filtered[12]).toBeCloseTo(2);
+  expect(result.confidence[12]).toBeGreaterThan(0);
+  expect(result.weakSupportedCount).toBeGreaterThan(0);
+});
+
+test("does not average a narrow foreground strip into its wall background", () => {
+  const depths = new Float32Array(25).fill(2);
+  [2, 7, 12, 17, 22].forEach((index) => {
+    depths[index] = 1.94;
+  });
+  const result = filterDepth({ columns: 5, rows: 5, depths });
+  expect(result.filtered[12]).toBeLessThan(1.96);
+  expect(result.filtered[12]).toBeGreaterThan(1.92);
+  expect(result.filtered[11]).toBeGreaterThan(1.98);
+});
+
+test("does not retain an isolated or depth-discontinuous sample", () => {
+  const depths = new Float32Array(25);
+  depths[12] = 2;
+  depths[7] = 1;
+  depths[17] = 3;
+  const result = filterDepth({ columns: 5, rows: 5, depths });
+  expect(result.filtered[12]).toBe(0);
+});
+
+test("excludes explicitly configured samples far below the detected floor", () => {
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(0), planeKeyframe(0.08), planeKeyframe(-0.08)],
+    { floorY: 0, floorOutlierTolerance: 0.4 },
+  );
+  expect(result.diagnostics.floorOutlierSamples).toBeGreaterThan(0);
+  expect(result.diagnostics.floorOutlierRatio).toBeGreaterThan(0);
+  const yValues = Array.from(result.observations.positions).filter(
+    (_, index) => index % 3 === 1,
+  );
+  expect(Math.min(...yValues)).toBeGreaterThanOrEqual(-0.4);
+});
+
+test("removes triangles that bridge unsupported mesh gaps", () => {
+  const mesh = {
+    positions: new Float32Array([
+      0, 0, 0, 0.02, 0, 0, 0, 0.02, 0,
+      0, 0, 0, 0.2, 0, 0, 0, 0.2, 0,
+    ]),
+    indices: new Uint32Array([0, 1, 2, 3, 4, 5]),
+    colors: new Uint8Array(18).fill(120),
+  };
+  const diagnostics = meshBridgeDiagnostics(mesh, 0.02, { maxEdge: 0.06 });
+  expect(diagnostics.longEdgeTriangles).toBe(1);
+  const pruned = pruneUnsupportedMeshBridges(mesh, 0.02, {
+    maxEdge: 0.06,
+  });
+  expect(pruned.removedBridgeTriangles).toBe(1);
+  expect(Array.from(pruned.indices)).toEqual([0, 1, 2]);
+
+  const preservedFill = pruneUnsupportedMeshBridges(mesh, 0.02, {
+    maxEdge: 0.06,
+    protectedTrailingTriangles: 1,
+  });
+  expect(preservedFill.removedBridgeTriangles).toBe(0);
+  expect(Array.from(preservedFill.indices)).toEqual(Array.from(mesh.indices));
+});
+
+function gridPlaneWithMissingCell(missingColumn, missingRow) {
+  const positions = [];
+  const colors = [];
+  const indices = [];
+  for (let row = 0; row < 4; row++)
+    for (let column = 0; column < 4; column++) {
+      positions.push(column / 3, row / 3, 0);
+      colors.push(120, 160, 140);
+    }
+  for (let row = 0; row < 3; row++)
+    for (let column = 0; column < 3; column++) {
+      if (column === missingColumn && row === missingRow) continue;
+      const first = row * 4 + column;
+      indices.push(
+        first,
+        first + 4,
+        first + 1,
+        first + 1,
+        first + 4,
+        first + 5,
+      );
+    }
+  return {
+    positions: new Float32Array(positions),
+    colors: new Uint8Array(colors),
+    indices: new Uint32Array(indices),
+    surfaceArea: 8 / 9,
+  };
+}
+
+test("fills a small closed planar hole in the extracted mesh", () => {
+  const mesh = gridPlaneWithMissingCell(1, 1);
+  const repaired = fillSmallMeshHoles(mesh, { maxDiameter: 0.5 });
+  expect(repaired.filledHoleCount).toBe(1);
+  expect(repaired.filledHoleTriangles).toBe(4);
+  expect(repaired.indices.length).toBe(mesh.indices.length + 12);
+  expect(repaired.positions.length).toBe(mesh.positions.length + 3);
+});
+
+test("does not fill a hole connected to the mesh boundary", () => {
+  const mesh = gridPlaneWithMissingCell(1, 0);
+  const repaired = fillSmallMeshHoles(mesh, { maxDiameter: 0.5 });
+  expect(repaired.filledHoleCount).toBe(0);
+  expect(repaired.indices).toEqual(mesh.indices);
+});
+
+test("rejects a mesh made from many similarly sized floating islands", () => {
+  expect(
+    meshFragmentationIsUnacceptable({
+      keptComponentCount: 12,
+      dominantAreaRatio: 0.24,
+    }),
+  ).toBe(true);
+  expect(
+    meshFragmentationIsUnacceptable({
+      keptComponentCount: 3,
+      dominantAreaRatio: 0.8,
+    }),
+  ).toBe(false);
+});
+
+test("distinguishes planar room walls from a curled shell", () => {
+  const plane = {
+    positions: new Float32Array([
+      -1, 0, -2, 1, 0, -2, 1, 2, -2, -1, 2, -2,
+    ]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+  };
+  expect(
+    meshOutsideRectangularRoomModel(meshWallStructureDiagnostics(plane)),
+  ).toBe(false);
+
+  const positions = [];
+  const indices = [];
+  const segments = 36;
+  for (let segment = 0; segment < segments; segment++) {
+    const angle = (segment / segments) * Math.PI * 2;
+    positions.push(Math.cos(angle), 0, Math.sin(angle));
+    positions.push(Math.cos(angle), 2, Math.sin(angle));
+  }
+  for (let segment = 0; segment < segments; segment++) {
+    const next = (segment + 1) % segments;
+    const bottom = segment * 2;
+    const top = bottom + 1;
+    const nextBottom = next * 2;
+    const nextTop = nextBottom + 1;
+    indices.push(bottom, nextBottom, top, top, nextBottom, nextTop);
+  }
+  const shell = meshWallStructureDiagnostics({
+    positions: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  });
+  expect(shell.manhattanAlignedRatio).toBeLessThan(0.52);
+  expect(meshOutsideRectangularRoomModel(shell)).toBe(true);
+});
+
+function joinedWallPlanes(offsets, perpendicular = false) {
+  const positions = [];
+  const indices = [];
+  offsets.forEach((offset, plane) => {
+    const start = positions.length / 3;
+    if (perpendicular && plane === offsets.length - 1)
+      positions.push(0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1);
+    else
+      positions.push(0, 0, offset, 1, 0, offset, 1, 1, offset, 0, 1, offset);
+    indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
+  });
+  return {
+    positions: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
+}
+
+test("surface quality identifies multiple wall directions without rejecting the sector", () => {
+  const single = measuredSurfaceQualityDiagnostics(joinedWallPlanes([0]));
+  expect(single.assessed).toBe(true);
+  expect(single.dominantOrientationRatio).toBeGreaterThan(0.95);
+  expect(single.dominantLayerRatio).toBeGreaterThan(0.95);
+  expect(measuredSurfaceGapWarning(single)).toBeNull();
+
+  const corner = measuredSurfaceQualityDiagnostics(
+    joinedWallPlanes([0, 0], true),
+  );
+  expect(corner.dominantOrientationRatio).toBeLessThan(0.68);
+  const sector = measuredWallSectorQualityDiagnostics(
+    joinedWallPlanes([0, 0], true),
+  );
+  expect(sector.assessed).toBe(true);
+  expect(sector.wallCount).toBe(2);
+  expect(sector.walls.every((wall) => wall.assessed)).toBe(true);
+});
+
+test("surface quality detects competing parallel wall layers", () => {
+  const duplicated = measuredSurfaceQualityDiagnostics(
+    joinedWallPlanes([0, 0.3]),
+  );
+  expect(duplicated.assessed).toBe(true);
+  expect(duplicated.dominantLayerRatio).toBeLessThan(0.58);
+  expect(duplicated.duplicateLayerLikely).toBe(true);
+});
+
+test("straightens only existing vertices on a supported measured wall", () => {
+  const mesh = {
+    positions: new Float32Array([
+      -1, 0, -1.97, 0, 0, -2.03, 1, 0, -1.97,
+      -1, 1, -1.97, 0, 1, -2.03, 1, 1, -1.97,
+      -1, 2, -1.97, 0, 2, -2.03, 1, 2, -1.97,
+    ]),
+    indices: new Uint32Array([
+      0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4,
+      3, 4, 7, 3, 7, 6, 4, 5, 8, 4, 8, 7,
+    ]),
+  };
+  const originalIndices = new Uint32Array(mesh.indices);
+  const result = stabilizeMeasuredWallSectors(
+    mesh,
+    [{
+      dominantNormal: { x: 0, z: 1 },
+      wallOffset: -2,
+      dominantOrientationRatio: 0.95,
+      dominantLayerRatio: 0.95,
+      bounds: { minX: -1, maxX: 1, minY: 0, maxY: 2 },
+    }],
+    0.025,
+  );
+  expect(result.indices).toEqual(originalIndices);
+  expect(result.positions).toHaveLength(mesh.positions.length);
+  expect(result.stabilizedVertexCount).toBeGreaterThan(0);
+  expect(Math.abs(result.positions[2] + 2)).toBeLessThan(
+    Math.abs(mesh.positions[2] + 2),
+  );
+});
+
+test("does not collapse a nearby parallel layer onto a supported wall", () => {
+  const mesh = {
+    positions: new Float32Array([
+      -1, 0, -1.92, 0, 0, -2.08, 1, 0, -1.92,
+      -1, 1, -1.92, 0, 1, -2.08, 1, 1, -1.92,
+      -1, 2, -1.92, 0, 2, -2.08, 1, 2, -1.92,
+    ]),
+    indices: new Uint32Array([
+      0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4,
+      3, 4, 7, 3, 7, 6, 4, 5, 8, 4, 8, 7,
+    ]),
+  };
+  const result = stabilizeMeasuredWallSectors(
+    mesh,
+    [{
+      dominantNormal: { x: 0, z: 1 },
+      wallOffset: -2,
+      dominantOrientationRatio: 0.8,
+      dominantLayerRatio: 0.9,
+      bounds: { minX: -1, maxX: 1, minY: 0, maxY: 2 },
+    }],
+    0.025,
+  );
+  const depths = [...result.positions].filter((_, index) => index % 3 === 2);
+  expect(result.indices).toEqual(mesh.indices);
+  expect(result.stabilizedVertexCount).toBe(0);
+  expect(Math.max(...depths) - Math.min(...depths)).toBeGreaterThan(0.15);
+});
+
+test("flattens measured shelf planes without adding geometry", () => {
+  const positions = [];
+  const indices = [];
+  for (let z = 0; z < 3; z++)
+    for (let x = 0; x < 3; x++)
+      positions.push(x * 0.5, 1 + ((x + z) % 2 ? 0.018 : -0.018), z * 0.5);
+  for (let z = 0; z < 2; z++)
+    for (let x = 0; x < 2; x++) {
+      const first = z * 3 + x;
+      indices.push(
+        first,
+        first + 3,
+        first + 1,
+        first + 1,
+        first + 3,
+        first + 4,
+      );
+    }
+  const mesh = {
+    positions: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
+  const originalIndices = new Uint32Array(mesh.indices);
+  const before = positions.filter((_, index) => index % 3 === 1);
+  const result = stabilizeMeasuredHorizontalSurfaces(mesh, 0.025);
+  const after = [...result.positions].filter((_, index) => index % 3 === 1);
+  expect(result.indices).toEqual(originalIndices);
+  expect(result.positions).toHaveLength(mesh.positions.length);
+  expect(result.stabilizedHorizontalPlaneCount).toBe(1);
+  expect(result.stabilizedHorizontalVertexCount).toBeGreaterThan(0);
+  expect(Math.max(...after) - Math.min(...after)).toBeLessThan(
+    Math.max(...before) - Math.min(...before),
+  );
+});
+
+test("texture sharpness favors detailed camera frames over flat or clipped ones", () => {
+  const frame = (pixels) => ({
+    colorImage: new Uint8Array(pixels),
+    colorWidth: 4,
+    colorHeight: 4,
+    colorChannels: 4,
+  });
+  const flat = frame(Array(16).fill([120, 120, 120, 255]).flat());
+  const checker = frame(
+    Array.from({ length: 16 }, (_, index) => {
+      const value = (index + Math.floor(index / 4)) % 2 ? 40 : 210;
+      return [value, value, value, 255];
+    }).flat(),
+  );
+  expect(imageSharpness(checker)).toBeGreaterThan(imageSharpness(flat));
+  expect(imageFocus(checker)).toBeGreaterThan(imageFocus(flat));
+});
+
+test("texture projection detects a stretched triangle footprint", () => {
+  const points = [[0, 0, 0], [1, 0, 0], [0, 1, 0]];
+  const regular = textureProjectionStretch(
+    points,
+    [{ u: 0, v: 0 }, { u: 0.1, v: 0 }, { u: 0, v: 0.1 }],
+    1000,
+    1000,
+  );
+  const stretched = textureProjectionStretch(
+    points,
+    [{ u: 0, v: 0 }, { u: 0.1, v: 0 }, { u: 0, v: 0.001 }],
+    1000,
+    1000,
+  );
+  expect(regular.anisotropy).toBeLessThan(1.1);
+  expect(stretched.anisotropy).toBeGreaterThan(20);
+});
+
+test("texture color statistics ignore clipped glare and retain channel balance", () => {
+  const pixels = new Uint8Array([
+    255, 255, 255, 255,
+    160, 100, 80, 255,
+    160, 100, 80, 255,
+    0, 0, 0, 255,
+  ]);
+  const statistics = imageColorStatistics({
+    colorImage: pixels,
+    colorWidth: 2,
+    colorHeight: 2,
+    colorChannels: 4,
+  });
+  expect(statistics.samples).toBe(2);
+  expect(statistics.channels[0]).toBeGreaterThan(statistics.channels[1]);
+  expect(statistics.channels[1]).toBeGreaterThan(statistics.channels[2]);
+});
+
+test("texture color comparison detects abrupt exposure and color changes", () => {
+  expect(textureColorDifference([120, 110, 100], [122, 111, 101])).toBeLessThan(
+    0.03,
+  );
+  expect(textureColorDifference([120, 110, 100], [60, 95, 170])).toBeGreaterThan(
+    0.25,
+  );
+});
+
+test("overlapping RGB-D views receive correspondence-based color scales", () => {
+  const values = [80, 120, 160];
+  const frames = values.map((value, index) => {
+    const frame = planeKeyframe((index - 1) * 0.06);
+    for (let pixel = 0; pixel < frame.colorImage.length; pixel += 4) {
+      frame.colorImage[pixel] = value;
+      frame.colorImage[pixel + 1] = value;
+      frame.colorImage[pixel + 2] = value;
+      frame.colorImage[pixel + 3] = 255;
+    }
+    const filtered = filterDepth(frame);
+    frame.filteredDepth = filtered.filtered;
+    frame.measuredMask = filtered.measuredMask;
+    frame.filteredCount = frame.filteredDepth.reduce(
+      (count, depth) => count + (depth ? 1 : 0),
+      0,
+    );
+    return frame;
+  });
+  const calibration = overlapTextureColorScales(frames);
+  const corrected = values.map(
+    (value, index) => value * calibration.scales[index][0],
+  );
+  expect(calibration.pairCount).toBeGreaterThan(0);
+  expect(Math.max(...corrected) - Math.min(...corrected)).toBeLessThan(15);
+});
+
+test("overlap calibration cannot create a strong RGB color cast", () => {
+  const colors = [
+    [80, 120, 160],
+    [160, 100, 70],
+    [110, 130, 90],
+  ];
+  const frames = colors.map((color, index) => {
+    const frame = planeKeyframe((index - 1) * 0.06);
+    for (let pixel = 0; pixel < frame.colorImage.length; pixel += 4) {
+      frame.colorImage[pixel] = color[0];
+      frame.colorImage[pixel + 1] = color[1];
+      frame.colorImage[pixel + 2] = color[2];
+      frame.colorImage[pixel + 3] = 255;
+    }
+    const filtered = filterDepth(frame);
+    frame.filteredDepth = filtered.filtered;
+    frame.measuredMask = filtered.measuredMask;
+    frame.filteredCount = frame.filteredDepth.reduce(
+      (count, depth) => count + (depth ? 1 : 0),
+      0,
+    );
+    return frame;
+  });
+  const calibration = overlapTextureColorScales(frames);
+  expect(calibration.pairCount).toBeGreaterThan(0);
+  calibration.scales.forEach((scales) => {
+    expect(Math.max(...scales) / Math.min(...scales)).toBeLessThanOrEqual(1.13);
+  });
+});
+
+test("minority-layer filtering is limited to locally vertical surfaces", () => {
+  const preparedPatch = (horizontal) => {
+    const positions = [];
+    for (let y = 0; y < 3; y++)
+      for (let x = 0; x < 3; x++)
+        positions.push(
+          x - 1,
+          horizontal ? 1 : 1 - y,
+          horizontal ? y - 1 : -2,
+        );
+    return {
+      columns: 3,
+      rows: 3,
+      filteredDepth: new Float32Array(9).fill(2),
+      measuredMask: new Uint8Array(9).fill(1),
+      positions: new Float32Array(positions),
+    };
+  };
+  expect(sampleLooksLikeVerticalPatch(preparedPatch(false), 4)).toBe(true);
+  expect(sampleLooksLikeVerticalPatch(preparedPatch(true), 4)).toBe(false);
+});
+
+test("surface quality keeps a localized parallel furniture front", () => {
+  const mesh = {
+    positions: new Float32Array([
+      0, 0, 0, 2, 0, 0, 2, 2, 0, 0, 2, 0,
+      0.7, 0, 0.3, 1.3, 0, 0.3, 1.3, 0.5, 0.3, 0.7, 0.5, 0.3,
+    ]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]),
+  };
+  const quality = measuredSurfaceQualityDiagnostics(mesh);
+  expect(quality.assessed).toBe(true);
+  expect(quality.dominantLayerRatio).toBeLessThan(1);
+  expect(quality.duplicateLayerLikely).toBe(false);
+});
+
+test("automatic layer repair prunes frames outside the consensus wall", () => {
+  const frame = (frameId, z) => ({
+    frameId,
+    filteredCount: 12,
+    filteredDepth: new Float32Array(12).fill(2),
+    measuredMask: new Uint8Array(12).fill(1),
+    positions: new Float32Array(
+      Array.from({ length: 12 }, (_, index) => [index / 12, 0, z]).flat(),
+    ),
+  });
+  const repair = wallConsensusKeyframes(
+    [frame(0, 0), frame(1, 0), frame(2, 0), frame(3, 0), frame(4, 0.3), frame(5, 0.3)],
+    {
+      walls: [{ dominantNormal: { x: 0, z: 1 }, wallOffset: 0 }],
+    },
+  );
+  expect(repair.keptFrameIds).toEqual([0, 1, 2, 3]);
+  expect(repair.removedFrameIds).toEqual([4, 5]);
+});
+
+test("strict wall consensus removes shallow shifted depth layers", () => {
+  const frame = (frameId, z) => ({
+    frameId,
+    filteredCount: 12,
+    filteredDepth: new Float32Array(12).fill(2),
+    measuredMask: new Uint8Array(12).fill(1),
+    positions: new Float32Array(
+      Array.from({ length: 12 }, (_, index) => [index / 12, 0, z]).flat(),
+    ),
+  });
+  const repair = wallConsensusKeyframes(
+    [frame(0, 0), frame(1, 0), frame(2, 0), frame(3, 0), frame(4, 0.07), frame(5, 0.07)],
+    {
+      walls: [{ dominantNormal: { x: 0, z: 1 }, wallOffset: 0 }],
+    },
+    {
+      distanceTolerance: 0.055,
+      minimumRelativeRatio: 0.68,
+      minimumFramesRatio: 0.5,
+    },
+  );
+  expect(repair.keptFrameIds).toEqual([0, 1, 2, 3]);
+  expect(repair.removedFrameIds).toEqual([4, 5]);
+});
+
+test("surface quality detects a large enclosed unmeasured wall gap", () => {
+  const size = 7;
+  const positions = [];
+  const indices = [];
+  for (let y = 0; y < size; y++)
+    for (let x = 0; x < size; x++) positions.push(x / 6, y / 6, 0);
+  for (let y = 0; y < size - 1; y++)
+    for (let x = 0; x < size - 1; x++) {
+      if (x >= 2 && x <= 4 && y >= 2 && y <= 4) continue;
+      const first = y * size + x;
+      indices.push(
+        first,
+        first + size,
+        first + 1,
+        first + 1,
+        first + size,
+        first + size + 1,
+      );
+    }
+  const quality = measuredSurfaceQualityDiagnostics({
+    positions: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  });
+  expect(quality.assessed).toBe(true);
+  expect(quality.interiorMissingRatio).toBeGreaterThan(0.18);
+  expect(measuredSurfaceGapWarning(quality)).toEqual(
+    expect.objectContaining({
+      message: expect.stringMatching(/remain open/),
+      interiorMissingRatio: quality.interiorMissingRatio,
+    }),
+  );
+});
+
+test.each([
+  ["identity", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
+  ["90 degrees", [0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1]],
+  ["180 degrees", [-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1]],
+  ["270 degrees", [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1]],
+  ["crop and scale", [0.7, 0, 0, 0, 0, 0.55, 0, 0, 0, 0, 1, 0, 0.12, 0.2, 0, 1]],
+])("view-grid points round trip with a native %s depth mapping", (_, nativeMatrix) => {
+  const camera = new PerspectiveCamera(73, 12 / 7, 0.1, 20);
+  const projectionMatrix = [...camera.projectionMatrix.elements];
+  projectionMatrix[8] = 0.11;
+  projectionMatrix[9] = -0.07;
+  const transform = new Matrix4().makeRotationY(0.31);
+  transform.setPosition(1.3, 0.4, -0.8);
+  const view = {
+    projectionMatrix,
+    transform: { matrix: transform.elements },
+  };
+  const points = unprojectDepth(
+    {
+      getDepthInMeters: () => 2.4,
+      projectionMatrix,
+      transform: { matrix: new Matrix4().makeTranslation(20, 0, 0).elements },
+      normDepthBufferFromNormView: { matrix: nativeMatrix },
+    },
+    view,
+    12,
+    7,
+  );
+  const frame = createRgbdKeyframe(points, {
+    columns: 12,
+    rows: 7,
+    projectionMatrix,
+    transformMatrix: transform.elements,
+    nativeDepthUvTransform: nativeMatrix,
+  });
+  points.forEach((point) => {
+    const index = point.gridY * frame.columns + point.gridX;
+    const reconstructed = depthPosition(frame, index, frame.depths[index]);
+    const projected = projectWorld(frame, ...reconstructed);
+    expect(gridIndex(frame, projected.u, projected.v)).toBe(index);
+    expect(reconstructed[0]).toBeCloseTo(point.x, 5);
+    expect(reconstructed[1]).toBeCloseTo(point.y, 5);
+    expect(reconstructed[2]).toBeCloseTo(point.z, 5);
+  });
+});
+
+test("fuses repeated RGB-D views into one bounded surface", () => {
+  const keyframes = [0, 0.08, -0.08].map((x) => planeKeyframe(x));
+  const result = fuseRgbdKeyframes(keyframes, { floorY: 0 });
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  expect(result.mesh.kind).toBe("projective-tsdf-surface-net");
+  expect(result.mesh.textureCoverage).toBeGreaterThan(90);
+  expect(result.mesh.uvs).toHaveLength(result.mesh.vertexCount * 2);
+  expect(result.mesh.texture.data.length).toBeGreaterThan(0);
+  expect(result.mesh.normals).toHaveLength(result.mesh.positions.length);
+  expect(
+    result.diagnostics.roundTrip.every(
+      (frame) => frame.checked > 100 && frame.indexMismatches === 0,
+    ),
+  ).toBe(true);
+});
+
+test("filtered positions preserve a rotated wall captured with an off-axis projection", () => {
+  const camera = new PerspectiveCamera(80, 1, 0.1, 20);
+  const projectionMatrix = [...camera.projectionMatrix.elements];
+  projectionMatrix[8] = 0.15;
+  projectionMatrix[9] = -0.08;
+  const angle = 0.3;
+  const frames = [0, 0.08, -0.08].map((x) => {
+    const transform = new Matrix4().makeRotationY(angle);
+    transform.setPosition(x * Math.cos(angle), 0, -x * Math.sin(angle));
+    const view = { projectionMatrix, transform: { matrix: transform.elements } };
+    return createRgbdKeyframe(unprojectDepth(
+      { getDepthInMeters: () => 2 }, view, 16, 16,
+    ), { columns: 16, rows: 16, projectionMatrix, transformMatrix: transform.elements });
+  });
+  const result = fuseRgbdKeyframes(frames);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  for (let i = 0; i < result.mesh.positions.length; i += 3) {
+    const normalDistance = Math.sin(angle) * result.mesh.positions[i] +
+      Math.cos(angle) * result.mesh.positions[i + 2];
+    expect(Math.abs(normalDistance + 2)).toBeLessThan(0.06);
+  }
+});
+
+test("a wall viewed obliquely from different camera poses remains planar", () => {
+  const camera = new PerspectiveCamera(65, 0.65, 0.1, 20);
+  const normal = new Vector3(0.45, 0.18, 1);
+  const frames = [-0.15, 0, 0.15].map((x) => {
+    const pose = new Matrix4().makeRotationY(x * 0.6);
+    pose.setPosition(x, 0, 0);
+    const origin = new Vector3(x, 0, 0);
+    const view = { projectionMatrix: camera.projectionMatrix.elements, transform: { matrix: pose.elements } };
+    const points = unprojectDepth({ getDepthInMeters: (u, v) => {
+      const ray = new Vector3(u * 2 - 1, 1 - v * 2, 0.5)
+        .applyMatrix4(camera.projectionMatrixInverse);
+      ray.multiplyScalar(1 / -ray.z);
+      ray.applyMatrix4(pose).sub(origin);
+      return -(2.5 + normal.dot(origin)) / normal.dot(ray);
+    } }, view, 28, 40);
+    return createRgbdKeyframe(points, {
+      columns: 28, rows: 40,
+      projectionMatrix: view.projectionMatrix,
+      transformMatrix: pose.elements,
+      camera: origin,
+    });
+  });
+  const result = fuseRgbdKeyframes(frames, { maxDimension: 64 });
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  let checked = 0, squaredError = 0;
+  const p = result.mesh.positions;
+  for (let i = 0; i < p.length; i += 3) {
+    if (Math.abs(p[i]) > 0.6 || Math.abs(p[i + 1]) > 0.6) continue;
+    const error = (normal.x * p[i] + normal.y * p[i + 1] + p[i + 2] + 2.5) / normal.length();
+    squaredError += error * error;
+    checked++;
+  }
+  expect(checked).toBeGreaterThan(100);
+  expect(Math.sqrt(squaredError / checked)).toBeLessThan(0.015);
+});
+
+test("refuses to finish when room-direction coverage is incomplete", () => {
+  const keyframe = planeKeyframe(0, false);
+  const result = fuseRgbdKeyframes([keyframe], {
+    floorY: 0,
+    headingCoverage: 25,
+  });
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.reason).toMatch(/Reach at least 75%/);
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("allows validated multi-view surface fusion without a room heading sweep", () => {
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(0), planeKeyframe(0.08), planeKeyframe(-0.08)],
+    { floorY: 0, headingCoverage: 25, completionMode: "surface" },
+  );
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  expect(result.diagnostics.completionMode).toBe("surface");
+  expect(result.diagnostics.measuredSurfaceQuality.assessed).toBe(true);
+  expect(result.diagnostics.measuredSurfaceQuality.gridCoverage).toBeGreaterThan(0.42);
+  expect(result.diagnostics.measuredReviewWarning).toBeNull();
+  expect(result.diagnostics.alignment.surfaceConsistency.applied).toBe(true);
+  expect(result.diagnostics.textureProjectionMode).toBe(
+    "final-mesh-positions",
+  );
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("rejects a drifted pose without losing the consistent wall", () => {
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(0), planeKeyframe(0.08), planeKeyframe(-0.08), planeKeyframe(8)],
+    { floorY: 0 },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  expect(result.diagnostics.rejectedKeyframes).toBeGreaterThanOrEqual(1);
+  expect(result.observations.count).toBeGreaterThan(0);
+  expect(Math.max(...result.observations.positions)).toBeLessThan(3);
+});
+
+test("uses depth geometry for visibility and camera geometry for color UVs", () => {
+  const frames = [0, 0.08, -0.08].map((x) => {
+    const frame = planeKeyframe(x);
+    frame.viewTransformMatrix = new Float32Array(frame.transformMatrix);
+    frame.viewTransformMatrix[14] += 0.3;
+    return frame;
+  });
+  const result = fuseRgbdKeyframes(frames);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.mesh.textureCoverage).toBeGreaterThan(90);
+});
+
+test("resamples different camera image sizes into valid atlas tiles", () => {
+  const frames = [0, 0.08, -0.08].map((x, index) => {
+    const frame = planeKeyframe(x);
+    if (index === 1) {
+      frame.colorWidth = 4;
+      frame.colorHeight = 6;
+      frame.colorImage = new Uint8Array(4 * 6 * 4).fill(140);
+    }
+    return frame;
+  });
+  const result = fuseRgbdKeyframes(frames);
+  expect(result.mesh?.texture.data.length).toBeGreaterThan(0);
+  expect(Math.min(...result.mesh.texture.data)).toBeGreaterThan(0);
+});
+
+test("keeps softer retained camera views available for texture coverage", () => {
+  const frames = [0, 0.04, 0.08, -0.04, -0.08].map((x) =>
+    planeKeyframe(x),
+  );
+  frames[2].colorImage = new Uint8Array(
+    Array.from({ length: 64 }, (_, index) => {
+      const value = (index + Math.floor(index / 8)) % 2 ? 25 : 230;
+      return [value, value, value, 255];
+    }).flat(),
+  );
+  const result = fuseRgbdKeyframes(frames);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.lowQualityTextureFrames).toBeGreaterThan(0);
+  expect(result.diagnostics.rejectedBlurryTextureFrames).toBe(0);
+  const selectedTiles = new Set();
+  const selectedTileCounts = new Map();
+  for (let vertex = 0; vertex < result.mesh.colors.length / 3; vertex++) {
+    if (result.mesh.colors[vertex * 3] !== 255) continue;
+    const tileX = Math.floor(result.mesh.uvs[vertex * 2] * 3);
+    const tileY = Math.floor(result.mesh.uvs[vertex * 2 + 1] * 2);
+    const tile = tileY * 3 + tileX;
+    selectedTiles.add(tile);
+    selectedTileCounts.set(tile, (selectedTileCounts.get(tile) || 0) + 1);
+  }
+  // All views remain available, but the detailed frame wins everywhere that
+  // it has the same valid depth coverage as the softer frames.
+  expect(selectedTiles.has(2)).toBe(true);
+  expect(selectedTileCounts.get(2)).toBeGreaterThan(
+    (selectedTileCounts.get(4) || 0) * 20,
+  );
+});
+
+test("a bad first frame cannot force a valid overlapping sequence into fallback", () => {
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(8), planeKeyframe(0), planeKeyframe(0.08), planeKeyframe(-0.08)],
+    { floorY: 0 },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  expect(result.mesh.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.rejectedKeyframes).toBeGreaterThanOrEqual(1);
+});
+
+test("preserves a broad unmeasured opening in an otherwise stable wall", () => {
+  const result = fuseRgbdKeyframes(
+    [
+      planeKeyframe(0, true, true),
+      planeKeyframe(0.08, true, true),
+      planeKeyframe(-0.08, true, true),
+    ],
+    { floorY: 0 },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  let centerTriangles = 0;
+  for (let index = 0; index < result.mesh.indices.length; index += 3) {
+    const vertices = [
+      result.mesh.indices[index],
+      result.mesh.indices[index + 1],
+      result.mesh.indices[index + 2],
+    ];
+    const centerX = vertices.reduce(
+      (sum, vertex) => sum + result.mesh.positions[vertex * 3] / 3,
+      0,
+    );
+    const centerY = vertices.reduce(
+      (sum, vertex) => sum + result.mesh.positions[vertex * 3 + 1] / 3,
+      0,
+    );
+    if (Math.abs(centerX) < 0.2 && Math.abs(centerY) < 0.2)
+      centerTriangles++;
+  }
+  expect(centerTriangles).toBe(0);
+});
+
+test("repairs an isolated depth dropout without opening a hole in the wall", () => {
+  const result = fuseRgbdKeyframes(
+    [
+      planeKeyframe(0, true, "single"),
+      planeKeyframe(0.08, true, "single"),
+      planeKeyframe(-0.08, true, "single"),
+    ],
+    { floorY: 0 },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  let centerTriangles = 0;
+  for (let index = 0; index < result.mesh.indices.length; index += 3) {
+    const vertices = [
+      result.mesh.indices[index],
+      result.mesh.indices[index + 1],
+      result.mesh.indices[index + 2],
+    ];
+    const centerX = vertices.reduce(
+      (sum, vertex) => sum + result.mesh.positions[vertex * 3] / 3,
+      0,
+    );
+    const centerY = vertices.reduce(
+      (sum, vertex) => sum + result.mesh.positions[vertex * 3 + 1] / 3,
+      0,
+    );
+    if (Math.abs(centerX) < 0.2 && Math.abs(centerY) < 0.2)
+      centerTriangles++;
+  }
+  expect(centerTriangles).toBeGreaterThan(0);
+});
+
+test("rejects a repeatedly reported near-field phantom contradicted by clear views", () => {
+  const keyframes = [
+    planeKeyframe(0),
+    planeKeyframe(0.04, true, false, true),
+    planeKeyframe(-0.04, true, false, true),
+    planeKeyframe(0.08, true, false, true),
+    planeKeyframe(-0.08, true, false, true),
+    planeKeyframe(0.12),
+    planeKeyframe(-0.12),
+    planeKeyframe(0.16),
+    planeKeyframe(-0.16),
+  ];
+  const result = fuseRgbdKeyframes(keyframes, { floorY: 0 });
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  let closestSurface = -Infinity;
+  for (let index = 2; index < result.mesh.positions.length; index += 3)
+    closestSurface = Math.max(closestSurface, result.mesh.positions[index]);
+  expect(closestSurface).toBeLessThan(-1.2);
+});
+
+function measuredBackArea(mesh) {
+  let area = 0;
+  for (let i = 0; i < mesh.indices.length; i += 3) {
+    const points = [0, 1, 2].map((corner) => {
+      const offset = mesh.indices[i + corner] * 3;
+      return Array.from(mesh.positions.slice(offset, offset + 3));
+    });
+    const center = [0, 1, 2].map((axis) =>
+      (points[0][axis] + points[1][axis] + points[2][axis]) / 3);
+    if (center[0] <= -1.6 || center[0] >= -1.05 ||
+        center[1] <= 1.05 || center[1] >= 1.6 ||
+        Math.abs(center[2] + 2) >= 0.05) continue;
+    const a = points[1].map((v, axis) => v - points[0][axis]);
+    const b = points[2].map((v, axis) => v - points[0][axis]);
+    area += Math.hypot(a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]) / 2;
+  }
+  return area;
+}
+
+test.each([1, 0.6])("preserves at least 85%% of a wall later occluded at %sm", (depth) => {
+  // This exact visible wall region used to go from 0.302m² to zero solely
+  // because ten later views saw an object in front of it.
+  const frames = [0, 0.05, -0.05].map((x) => planeKeyframe(x));
+  const baseline = fuseRgbdKeyframes(frames).mesh;
+  const result = fuseRgbdKeyframes([
+    ...frames,
+    ...[0.08, -0.08, 0.11, -0.11, 0.14, -0.14, 0.17, -0.17, 0.2, -0.2]
+      .map((x) => planeKeyframe(x, true, false, depth)),
+  ]);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(measuredBackArea(result.mesh)).toBeGreaterThan(measuredBackArea(baseline) * 0.85);
+});
+
+test("rejects a 14cm pose error that passes the spatial-neighbor overlap check", () => {
+  const shifted = planeKeyframe(0.04);
+  shifted.transformMatrix[14] = 0.14;
+  const result = fuseRgbdKeyframes([
+    planeKeyframe(0), shifted, planeKeyframe(0.08), planeKeyframe(-0.08),
+  ]);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.rejectedFrameIds).toContain(1);
+  expect(result.diagnostics.alignment.pairs.some((pair) =>
+    (pair.firstFrame === 1 || pair.secondFrame === 1) && !pair.accepted)).toBe(true);
+  expect(result.mesh.bounds.max.z).toBeLessThan(-1.95);
+});
+
+test("partial-surface consistency removes a smaller pose drift before fusion", () => {
+  const shifted = planeKeyframe(0.04);
+  shifted.transformMatrix[14] = 0.06;
+  const result = fuseRgbdKeyframes(
+    [
+      planeKeyframe(0),
+      shifted,
+      planeKeyframe(0.08),
+      planeKeyframe(-0.08),
+    ],
+    { completionMode: "surface" },
+  );
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.surfaceConsistency.applied).toBe(true);
+  expect(
+    result.diagnostics.alignment.surfaceConsistency.rejectedFrameIds,
+  ).toContain(1);
+});
+
+test("partial-surface consistency does not accept a gradual drift chain", () => {
+  const frames = Array.from({ length: 7 }, (_, index) => {
+    const frame = planeKeyframe((index - 3) * 0.04, false);
+    const drift = index * 0.035;
+    frame.transformMatrix[14] = drift;
+    frame.viewTransformMatrix[14] = drift;
+    frame.camera[2] = drift;
+    return frame;
+  });
+  const result = fuseRgbdKeyframes(frames, {
+    completionMode: "surface",
+    requireCoherentSurfaceCore: true,
+  });
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.surfaceConsistency.selectionMode).toBe(
+    "anchor-core",
+  );
+  expect(
+    result.diagnostics.alignment.surfaceConsistency.selectedFrameIds.length,
+  ).toBeLessThan(frames.length);
+  expect(result.diagnostics.fusedFrameIds.length).toBeLessThan(frames.length);
+});
+
+test("preferred surface consistency preserves a broad connected scan path", () => {
+  const frames = [0, 1.4, 2.8, 4.2, 5.6, 7, 8.4, 9.8].map((cameraX) =>
+    planeKeyframe(cameraX),
+  );
+  const result = fuseRgbdKeyframes(frames, {
+    completionMode: "surface",
+    preferCoherentSurfaceCore: true,
+    maxDimension: 48,
+  });
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.surfaceConsistency.selectionMode).toBe(
+    "anchor-core",
+  );
+  expect(
+    result.diagnostics.alignment.surfaceConsistency.selectedRatio,
+  ).toBeLessThan(0.8);
+  expect(result.diagnostics.alignment.surfaceConsistency.applied).toBe(false);
+  expect(
+    result.diagnostics.alignment.surfaceConsistency.fallbackToGeneralOverlap,
+  ).toBe(true);
+  expect(result.diagnostics.fusedFrameIds).toHaveLength(frames.length);
+});
+
+test("suppresses a minority reflective strip before surface fusion", () => {
+  const shifted = [-0.12, -0.08].map((cameraX) => {
+    const frame = planeKeyframe(cameraX);
+    for (let y = 2; y < frame.rows - 2; y++)
+      for (let x = 7; x <= 9; x++)
+        frame.depths[y * frame.columns + x] = 1.82;
+    return frame;
+  });
+  const result = fuseRgbdKeyframes(
+    [
+      ...shifted,
+      ...[-0.04, 0, 0.04, 0.08, 0.12, 0.16].map((cameraX) =>
+        planeKeyframe(cameraX),
+      ),
+    ],
+    { completionMode: "surface" },
+  );
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(
+    result.diagnostics.alignment.localLayerConsensus.rejectedSamples,
+  ).toBeGreaterThan(0);
+  let protrudingVertices = 0;
+  for (let index = 0; index < result.mesh.positions.length; index += 3)
+    if (
+      result.mesh.positions[index + 2] > -1.9 &&
+      Math.abs(result.mesh.positions[index]) < 0.5 &&
+      Math.abs(result.mesh.positions[index + 1]) < 1.6
+    )
+      protrudingVertices++;
+  expect(protrudingVertices).toBe(0);
+});
+
+test("rejects a frame when only one quarter of its wall depth agrees", () => {
+  const mostlyShifted = planeKeyframe(0.04);
+  for (let y = 0; y < mostlyShifted.rows; y++)
+    for (let x = 4; x < mostlyShifted.columns; x++)
+      mostlyShifted.depths[y * mostlyShifted.columns + x] = 2.14;
+  const result = fuseRgbdKeyframes([
+    planeKeyframe(0),
+    mostlyShifted,
+    planeKeyframe(0.08),
+    planeKeyframe(-0.08),
+  ]);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.rejectedFrameIds).toContain(1);
+});
+
+test("does not mutate accepted poses without explicit validated refinement", () => {
+  const drifted = planeKeyframe(0.04);
+  const angle = 0.025;
+  drifted.transformMatrix[0] = Math.cos(angle);
+  drifted.transformMatrix[2] = -Math.sin(angle);
+  drifted.transformMatrix[8] = Math.sin(angle);
+  drifted.transformMatrix[10] = Math.cos(angle);
+  drifted.transformMatrix[12] += 0.025;
+  drifted.transformMatrix[14] += 0.025;
+  const originalPose = new Float32Array(drifted.transformMatrix);
+  const result = fuseRgbdKeyframes([
+    planeKeyframe(0),
+    planeKeyframe(0.08),
+    drifted,
+    planeKeyframe(-0.08),
+  ]);
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.poseCorrectionApplied).toBe(false);
+  expect(result.diagnostics.alignment.poseRefinement).toBe(
+    "disabled-until-independently-validated",
+  );
+  expect(drifted.transformMatrix).toEqual(originalPose);
+});
+
+test("validated pose refinement removes a small depth-pose drift before fusion", () => {
+  const drifted = planeKeyframe(0.04);
+  drifted.transformMatrix[14] += 0.035;
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(0), drifted, planeKeyframe(0.08), planeKeyframe(-0.08)],
+    { completionMode: "surface", poseRefinement: "validated" },
+  );
+  expect(result.mesh?.kind).toBe("projective-tsdf-surface-net");
+  expect(result.diagnostics.alignment.poseCorrectionApplied).toBe(true);
+  expect(
+    result.diagnostics.alignment.poseRefinementDiagnostics.corrected,
+  ).toBeGreaterThan(0);
+  expect(
+    result.diagnostics.alignment.poseRefinementDiagnostics.corrections.some(
+      (correction) => correction.frameId === 1,
+    ),
+  ).toBe(true);
+});
+
+test("preserves a measured back surface through ordinary furniture-depth occlusion", () => {
+  const result = fuseRgbdKeyframes(
+    [
+      planeKeyframe(0),
+      planeKeyframe(0.05),
+      planeKeyframe(-0.05),
+      ...[0.08, -0.08, 0.11, -0.11, 0.14, -0.14, 0.17].map(
+        (cameraX) => planeKeyframe(cameraX, true, false, 1.45),
+      ),
+    ],
+    { floorY: 0 },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  let backVertices = 0;
+  for (let index = 0; index < result.mesh.positions.length; index += 3)
+    if (
+      result.mesh.positions[index] < -0.55 &&
+      result.mesh.positions[index + 1] > 0.55 &&
+      result.mesh.positions[index + 2] < -1.8
+    )
+      backVertices++;
+  expect(backVertices).toBeGreaterThan(0);
+});
+
+test("accepts three independent close-range views as reliable support", () => {
+  const result = fuseRgbdKeyframes(
+    [0, 0.06, -0.06].map((cameraX) =>
+      planeKeyframe(cameraX, true, false, false, 0.62),
+    ),
+    { floorY: 0, completionMode: "surface" },
+  );
+  expect(result.mesh?.triangleCount).toBeGreaterThan(0);
+  expect(result.diagnostics.confirmedVoxels).toBeGreaterThan(0);
+});
+
+test("does not substitute a single-view mesh when close-range fusion fails", () => {
+  const result = fuseRgbdKeyframes(
+    [0, 0.04, -0.04].map((x) => planeKeyframe(x, true, "single", false, 0.62)),
+  );
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("one-wall coverage cannot bypass the room completion gate", () => {
+  const reference = planeKeyframe(0, true, true);
+  const result = fuseRgbdKeyframes([
+    reference,
+    planeKeyframe(0.08, false),
+    planeKeyframe(-0.08, false),
+  ], { floorY: 0, headingCoverage: 25 });
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.reason).toMatch(/75%/);
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("refuses a result when captured poses cannot be aligned", () => {
+  const result = fuseRgbdKeyframes(
+    [planeKeyframe(0), planeKeyframe(8)],
+    { floorY: 0 },
+  );
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.overlappingKeyframes).toBe(1);
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("same-position frames cannot masquerade as independent fusion support", () => {
+  const repeated = planeKeyframe(0);
+  const duplicate = planeKeyframe(0);
+  const result = fuseRgbdKeyframes([repeated, duplicate], { floorY: 0 });
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.confirmedVoxels).toBe(0);
+  expect(result.diagnostics.fallback).toBeUndefined();
+});
+
+test("does not choose either unaligned view as a fallback result", () => {
+  const result = fuseRgbdKeyframes(
+    [
+      planeKeyframe(0, true, false, false, 0.7),
+      planeKeyframe(8, true, false, false, 2),
+    ],
+    { floorY: 0 },
+  );
+  expect(result.mesh).toBeNull();
+  expect(result.diagnostics.overlappingKeyframes).toBe(1);
+  expect(result.diagnostics.fallback).toBeUndefined();
+});

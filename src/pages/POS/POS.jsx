@@ -1,0 +1,1932 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  BarcodeOutlined,
+  DeleteOutlined,
+  LeftOutlined,
+  HistoryOutlined,
+  MinusOutlined,
+  PlusOutlined,
+  PrinterOutlined,
+  RollbackOutlined,
+  SearchOutlined,
+  ShoppingCartOutlined,
+  RightOutlined,
+} from "@ant-design/icons";
+
+import {
+  Button,
+  Card,
+  Skeleton,
+  Col,
+  Empty,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  
+  Row,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Table,
+  Typography,
+  message,
+} from "antd";
+
+import api from "../../services/api";
+import { useAuth } from "../../context/AuthContext";
+
+import "./POS.css";
+
+const { Title, Text } = Typography;
+
+const PRINTER_SERVER = (process.env.REACT_APP_PRINTER_SERVER_URL || "http://localhost:5100").replace(/\/+$/, "");
+
+const printerFetch = (path, options = {}) =>
+  fetch(`${PRINTER_SERVER}${path}`, {
+    ...options,
+    targetAddressSpace: "loopback",
+  });
+
+const POS = () => {
+  const { user } = useAuth();
+  const canRefundDirectly = ["SUPER_ADMIN", "ADMIN", "MANAGER"].includes(user?.role);
+  const searchRef = useRef(null);
+  const cartItemsRef = useRef(null);
+
+  // =========================
+  // DATA
+  // =========================
+
+  const [products, setProducts] = useState([]);
+  const [branches, setBranches] = useState([]);
+  const [inventory, setInventory] = useState([]);
+
+  // =========================
+  // LOADING
+  // =========================
+
+  const [loading, setLoading] = useState(true);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [processing, setProcessing] = useState(false);
+
+  // =========================
+  // BRANCH
+  // =========================
+
+  const [selectedBranch, setSelectedBranch] = useState("");
+
+  // =========================
+  // SEARCH
+  // =========================
+
+  const [search, setSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("All");
+  const [productPage, setProductPage] = useState(0);
+  const [recentProductIds, setRecentProductIds] = useState([]);
+  const [selectedCartProductId, setSelectedCartProductId] = useState(null);
+
+  // =========================
+  // CART
+  // =========================
+
+  const [cart, setCart] = useState([]);
+
+  useEffect(() => {
+    if (!selectedCartProductId) return;
+
+    const itemElement = cartItemsRef.current?.querySelector(
+      `[data-cart-product-id="${selectedCartProductId}"]`,
+    );
+
+    itemElement?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [cart, selectedCartProductId]);
+
+  // =========================
+  // PAYMENT
+  // =========================
+  const paymentMethod = "CASH";
+  const [amountPaid, setAmountPaid] = useState(0);
+
+  // =========================
+  // RECEIPT
+  // =========================
+
+  const [receipt, setReceipt] = useState(null);
+  const [receiptOpen, setReceiptOpen] = useState(false);
+
+  // =========================
+  // PRINTER
+  // =========================
+
+  const [printers, setPrinters] = useState([]);
+  const [selectedPrinter, setSelectedPrinter] = useState("");
+  const [printerLoading, setPrinterLoading] = useState(true);
+  const [printerOnline, setPrinterOnline] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const printingRef = useRef(false);
+
+  const [salesHistory, setSalesHistory] = useState([]);
+  const [salesHistoryOpen, setSalesHistoryOpen] = useState(false);
+  const [salesHistoryLoading, setSalesHistoryLoading] = useState(false);
+  const [salesHistorySearch, setSalesHistorySearch] = useState("");
+  const [refundSale, setRefundSale] = useState(null);
+  const [refundSaving, setRefundSaving] = useState(false);
+  const [refundForm] = Form.useForm();
+
+  // =========================
+  // INITIAL DATA
+  // =========================
+
+  const fetchInitialData = async () => {
+    try {
+      setLoading(true);
+
+      const [productsResponse, branchesResponse] = await Promise.all([
+        api.get("/products"),
+        api.get("/branches"),
+      ]);
+
+      setProducts(productsResponse.data.filter((product) => product.isActive));
+
+      const activeBranches = branchesResponse.data.filter(
+        (branch) => branch.isActive,
+      );
+
+      setBranches(activeBranches);
+
+      if (activeBranches.length > 0) {
+        setSelectedBranch(activeBranches[0]._id);
+      }
+    } catch (error) {
+      console.error(error);
+
+      message.error(
+        error.response?.data?.message || "Failed to load POS data.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchInitialData();
+  }, []);
+
+  // =========================
+  // PRINTER DETECTION
+  // =========================
+
+  const fetchPrinters = async () => {
+    try {
+      setPrinterLoading(true);
+
+      const response = await printerFetch("/printers");
+
+      if (!response.ok) {
+        throw new Error("Printer service unavailable.");
+      }
+
+      const data = await response.json();
+
+      setPrinters(data.printers || []);
+
+      setSelectedPrinter(data.selectedPrinter || data.defaultPrinter || "");
+
+      setPrinterOnline(true);
+    } catch (error) {
+      console.error("Printer detection error:", error);
+
+      setPrinters([]);
+      setSelectedPrinter("");
+      setPrinterOnline(false);
+    } finally {
+      setPrinterLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPrinters();
+  }, []);
+
+  // =========================
+  // PRINTER STATUS
+  // =========================
+
+  const checkPrinterStatus = async () => {
+    try {
+      const response = await printerFetch("/status");
+
+      if (!response.ok) {
+        throw new Error("Printer offline.");
+      }
+
+      const data = await response.json();
+
+      setPrinterOnline(data.online === true);
+
+      if (data.printer) {
+        setSelectedPrinter(data.printer);
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Printer status error:", error);
+
+      setPrinterOnline(false);
+
+      return false;
+    }
+  };
+
+  // Check printer every 5 seconds
+  useEffect(() => {
+    let mounted = true;
+
+    const checkStatus = async () => {
+      try {
+        const response = await printerFetch("/status", {
+          cache: "no-store",
+        });
+
+        const data = await response.json();
+
+        if (!mounted) return;
+
+        if (response.ok && data.online === true) {
+          setPrinterOnline(true);
+
+          if (data.printer) {
+            setSelectedPrinter(data.printer);
+          }
+        } else {
+          setPrinterOnline(false);
+        }
+      } catch (error) {
+        if (!mounted) return;
+
+        setPrinterOnline(false);
+      }
+    };
+
+    // Check immediately
+    checkStatus();
+
+    // Then check every 2 seconds
+    const interval = setInterval(checkStatus, 2000);
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // =========================
+  // SELECT PRINTER
+  // =========================
+
+  const handlePrinterChange = async (printer) => {
+    try {
+      const response = await printerFetch("/printer/select", {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          printer,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Failed to select printer.");
+      }
+
+      setSelectedPrinter(printer);
+      setPrinterOnline(true);
+
+      message.success(`Printer selected: ${printer}`);
+    } catch (error) {
+      console.error(error);
+
+      message.error(error.message || "Could not select printer.");
+
+      await checkPrinterStatus();
+    }
+  };
+
+  // =========================
+  // INVENTORY
+  // =========================
+
+  const fetchInventory = async (branchId) => {
+    if (!branchId) {
+      setInventory([]);
+      return;
+    }
+
+    try {
+      setInventoryLoading(true);
+
+      const response = await api.get(`/inventory/branch/${branchId}`);
+
+      setInventory(response.data);
+    } catch (error) {
+      console.error(error);
+
+      message.error(
+        error.response?.data?.message || "Failed to load branch inventory.",
+      );
+
+      setInventory([]);
+    } finally {
+      setInventoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedBranch) {
+      fetchInventory(selectedBranch);
+    }
+
+    setCart([]);
+    setAmountPaid(0);
+  }, [selectedBranch]);
+
+  // =========================
+  // INVENTORY MAP
+  // =========================
+
+  const inventoryMap = useMemo(() => {
+    const map = {};
+
+    inventory.forEach((item) => {
+      const productId = item.product?._id || item.product;
+
+      map[productId] = item;
+    });
+
+    return map;
+  }, [inventory]);
+
+  // =========================
+  // SEARCH PRODUCTS
+  // =========================
+
+  const categories = useMemo(() => {
+    const names = products
+      .map((product) => product.category?.name || product.category)
+      .filter(Boolean);
+
+    return ["All", ...new Set(names)];
+  }, [products]);
+
+  const filteredProducts = useMemo(() => {
+    const value = search.toLowerCase().trim();
+
+    return products
+      .filter((product) => {
+        const category = product.category?.name || product.category || "";
+        const name = product.name?.toLowerCase() || "";
+
+        const sku = product.sku?.toLowerCase() || "";
+
+        const barcode = product.barcode?.toLowerCase() || "";
+
+        const brand = product.brand?.toLowerCase() || "";
+
+        const matchesSearch =
+          !value ||
+          name.includes(value) ||
+          sku.includes(value) ||
+          barcode.includes(value) ||
+          brand.includes(value);
+
+        return (
+          matchesSearch &&
+          (selectedCategory === "All" || category === selectedCategory)
+        );
+      })
+      .sort((first, second) => {
+        const firstStock = Math.max((inventoryMap[first._id]?.quantity || 0) - (inventoryMap[first._id]?.reservedQuantity || 0), 0);
+        const secondStock = Math.max((inventoryMap[second._id]?.quantity || 0) - (inventoryMap[second._id]?.reservedQuantity || 0), 0);
+        return Number(secondStock > 0) - Number(firstStock > 0);
+      });
+  }, [products, search, selectedCategory, inventoryMap]);
+
+  const productPageSize = 30;
+  const productPageCount = Math.max(Math.ceil(filteredProducts.length / productPageSize), 1);
+  const visibleProducts = filteredProducts.slice(
+    productPage * productPageSize,
+    (productPage + 1) * productPageSize,
+  );
+
+  useEffect(() => {
+    setProductPage(0);
+  }, [search, selectedCategory, selectedBranch]);
+
+  useEffect(() => {
+    if (productPage >= productPageCount) setProductPage(Math.max(productPageCount - 1, 0));
+  }, [productPage, productPageCount]);
+
+  // =========================
+  // ADD TO CART
+  // =========================
+
+  const addToCart = (product) => {
+    if (!selectedBranch) {
+      message.warning("Select a branch first.");
+      return;
+    }
+
+    const inventoryItem = inventoryMap[product._id];
+
+    const available = Math.max(
+      (inventoryItem?.quantity || 0) - (inventoryItem?.reservedQuantity || 0),
+      0,
+    );
+
+    if (available <= 0) {
+      message.warning(`${product.name} is out of stock in this branch.`);
+      return;
+    }
+
+    const existing = cart.find((item) => item.product === product._id);
+
+    if (existing) {
+      if (existing.quantity >= available) {
+        message.warning(`Only ${available} available in this branch.`);
+        return;
+      }
+
+      setCart(
+        cart.map((item) =>
+          item.product === product._id
+            ? {
+                ...item,
+                quantity: item.quantity + 1,
+                subtotal: (item.quantity + 1) * item.unitPrice,
+              }
+            : item,
+        ),
+      );
+
+      setRecentProductIds((ids) =>
+        [product._id, ...ids.filter((id) => id !== product._id)].slice(0, 8),
+      );
+      setSelectedCartProductId(product._id);
+      window.setTimeout(() => searchRef.current?.focus(), 0);
+
+      return;
+    }
+
+    setCart([
+      ...cart,
+      {
+        product: product._id,
+        name: product.name,
+        sku: product.sku,
+        unit: product.unit,
+        unitPrice: Number(product.sellingPrice),
+        quantity: 1,
+        subtotal: Number(product.sellingPrice),
+        available,
+      },
+    ]);
+    setRecentProductIds((ids) =>
+      [product._id, ...ids.filter((id) => id !== product._id)].slice(0, 8),
+    );
+    setSelectedCartProductId(product._id);
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+  };
+
+  const handleProductSearch = (value) => {
+    const scannedValue = value.trim().toLowerCase();
+
+    if (!scannedValue) return;
+
+    const exactProduct = products.find((product) =>
+      [product.barcode, product.sku]
+        .filter(Boolean)
+        .some((code) => code.toLowerCase() === scannedValue),
+    );
+
+    if (exactProduct) {
+      addToCart(exactProduct);
+      setSearch("");
+      window.setTimeout(() => searchRef.current?.focus(), 0);
+      return;
+    }
+
+    message.warning("No product matches that barcode or SKU.");
+  };
+
+  // =========================
+  // QUANTITY
+  // =========================
+
+  const applyQuantity = (productId, quantity) => {
+    const cartItem = cart.find((item) => item.product === productId);
+
+    if (!cartItem) return;
+
+    const newQuantity = Number(quantity);
+
+    if (!newQuantity || newQuantity <= 0) {
+      removeFromCart(productId);
+      return;
+    }
+
+    if (newQuantity > cartItem.available) {
+      message.warning(`Only ${cartItem.available} available.`);
+      return;
+    }
+
+    setCart(
+      cart.map((item) =>
+        item.product === productId
+          ? {
+              ...item,
+              quantity: newQuantity,
+              subtotal: newQuantity * item.unitPrice,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const updateQuantity = (productId, quantity) => {
+    const cartItem = cart.find((item) => item.product === productId);
+    const newQuantity = Number(quantity);
+
+    if (cartItem && newQuantity > 10 && newQuantity > cartItem.quantity) {
+      Modal.confirm({
+        title: "Confirm large quantity",
+        content: `Set ${cartItem.name} to ${newQuantity} units?`,
+        okText: "Confirm quantity",
+        onOk: () => applyQuantity(productId, newQuantity),
+      });
+      return;
+    }
+
+    applyQuantity(productId, newQuantity);
+  };
+
+  const increaseQuantity = (productId) => {
+    const item = cart.find((cartItem) => cartItem.product === productId);
+
+    if (!item) return;
+
+    updateQuantity(productId, item.quantity + 1);
+  };
+
+  const decreaseQuantity = (productId) => {
+    const item = cart.find((cartItem) => cartItem.product === productId);
+
+    if (!item) return;
+
+    updateQuantity(productId, item.quantity - 1);
+  };
+
+  // =========================
+  // REMOVE
+  // =========================
+
+  const removeFromCart = (productId) => {
+    setCart(cart.filter((item) => item.product !== productId));
+    setSelectedCartProductId((selected) =>
+      selected === productId ? null : selected,
+    );
+  };
+
+  // =========================
+  // TOTALS
+  // =========================
+
+  const subtotal = useMemo(() => {
+    return cart.reduce((total, item) => total + item.subtotal, 0);
+  }, [cart]);
+
+  const total = subtotal;
+
+  const change = Math.max((Number(amountPaid) || 0) - total, 0);
+
+  const totalItems = cart.reduce((total, item) => total + item.quantity, 0);
+
+  // =========================
+  // PAYMENT
+  // =========================
+
+  const fetchSalesHistory = async () => {
+    try {
+      setSalesHistoryLoading(true);
+      const response = await api.get("/sales");
+      setSalesHistory(response.data || []);
+    } catch (error) {
+      console.error("Sales history error:", error);
+      message.error(error.response?.data?.message || "Failed to load transaction history.");
+    } finally {
+      setSalesHistoryLoading(false);
+    }
+  };
+
+  const openSalesHistory = async () => {
+    setSalesHistoryOpen(true);
+    await fetchSalesHistory();
+  };
+
+  const filteredSalesHistory = useMemo(() => {
+    const query = salesHistorySearch.trim().toLowerCase();
+    if (!query) return salesHistory;
+    return salesHistory.filter((sale) => {
+      const searchable = [
+        sale.receiptNumber,
+        sale.branch?.name,
+        sale.cashier?.name,
+        sale.paymentMethod,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return searchable.includes(query);
+    });
+  }, [salesHistory, salesHistorySearch]);
+
+  const openRefund = (sale) => {
+    setRefundSale(sale);
+    refundForm.setFieldsValue({
+      reason: "Customer return",
+      items: sale.items.map(() => ({
+        quantity: 0,
+      })),
+    });
+  };
+
+  const handleRefund = async (values) => {
+    if (!refundSale) return;
+    const items = (values.items || [])
+      .map((item, index) => ({
+        product: refundSale.items[index].product?._id || refundSale.items[index].product,
+        quantity: Number(item.quantity || 0),
+      }))
+      .filter((item) => item.quantity > 0);
+    if (!items.length) {
+      message.error("Select at least one item to return.");
+      return;
+    }
+    try {
+      setRefundSaving(true);
+      const response = await api.post(`/sales/${refundSale._id}/refund`, {
+        items,
+        reason: values.reason,
+        ...(canRefundDirectly ? {} : { approvalPin: values.approvalPin }),
+      });
+      message.success(`Refund processed: \u20B1${Number(response.data.refundAmount || 0).toLocaleString("en-PH", { minimumFractionDigits: 2 })}.`);
+      setRefundSale(null);
+      refundForm.resetFields();
+      await fetchSalesHistory();
+      if (selectedBranch) await fetchInventory(selectedBranch);
+    } catch (error) {
+      message.error(error.response?.data?.message || "Failed to process refund.");
+    } finally {
+      setRefundSaving(false);
+    }
+  };
+
+  // =========================
+  // PRINT RECEIPT
+  // =========================
+
+  const runPrintJob = async (job) => {
+    if (printingRef.current) {
+      message.info("A print job is already in progress.");
+      return false;
+    }
+
+    printingRef.current = true;
+    setPrinting(true);
+
+    try {
+      return await job();
+    } finally {
+      printingRef.current = false;
+      setPrinting(false);
+    }
+  };
+
+  const printReceipt = async (sale, isReprint = false) => {
+    return runPrintJob(async () => {
+      try {
+        const response = await printerFetch("/print", {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          branch: sale.branch?.name || "Hardware Store",
+
+          receiptNumber: sale.receiptNumber,
+
+          date: new Date(sale.createdAt).toLocaleString("en-PH"),
+
+          cashier: sale.cashier?.name || "Cashier",
+
+          items:
+            sale.items?.map((item) => ({
+              name: item.product?.name || "Product",
+
+              quantity: item.quantity,
+
+              price: item.unitPrice,
+            })) || [],
+
+          subtotal: sale.subtotal,
+
+          discount: sale.discount,
+
+          total: sale.totalAmount,
+
+          paymentMethod: sale.paymentMethod,
+
+          amountPaid: sale.amountPaid,
+
+          change: sale.changeAmount,
+        }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || data.message || "Printing failed.");
+        }
+
+        setPrinterOnline(true);
+
+        message.success("Receipt printed successfully.");
+
+        return true;
+      } catch (error) {
+        console.error("Printer error:", error);
+
+        setPrinterOnline(false);
+
+        message.warning(isReprint ? "Receipt could not be printed." : "Sale completed, but the receipt could not be printed.");
+
+        return false;
+      }
+    });
+  };
+
+  // =========================
+  // COMPLETE SALE
+  // =========================
+
+  const completeSale = async () => {
+    if (!selectedBranch) {
+      message.error("Select a branch.");
+      return;
+    }
+
+    if (cart.length === 0) {
+      message.error("Add products to the cart first.");
+      return;
+    }
+
+    if (paymentMethod === "CASH" && Number(amountPaid) < total) {
+      message.error("Amount paid is less than the total.");
+      return;
+    }
+
+    try {
+      setProcessing(true);
+
+      const payload = {
+        branch: selectedBranch,
+
+        items: cart.map((item) => ({
+          product: item.product,
+          quantity: item.quantity,
+        })),
+
+        discount: 0,
+
+        paymentMethod,
+
+        amountPaid: Number(amountPaid),
+      };
+
+      // =========================
+      // CREATE SALE
+      // =========================
+
+      const response = await api.post("/sales", payload);
+
+      const sale = response.data.sale;
+
+      if (!sale) {
+        throw new Error("Sale was created but no sale data was returned.");
+      }
+
+      // =========================
+      // REFRESH INVENTORY
+      // =========================
+
+      await fetchInventory(selectedBranch);
+
+      // =========================
+      // RECEIPT MODAL
+      // =========================
+
+      setReceipt(sale);
+      setReceiptOpen(true);
+
+      // =========================
+      // CLEAR CART
+      // =========================
+
+      setCart([]);
+        setAmountPaid(0);
+      // =========================
+      // PRINT
+      // =========================
+
+      await printReceipt(sale);
+
+      message.success("Sale completed successfully.");
+    } catch (error) {
+      console.error("Sale error:", error);
+
+      message.error(
+        error.response?.data?.message ||
+          error.message ||
+          "Failed to complete sale.",
+      );
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  // =========================
+  // CLEAR CART
+  // =========================
+
+  const clearCart = () => {
+    if (cart.length === 0) {
+      return;
+    }
+
+    Modal.confirm({
+      title: "Clear cart?",
+
+      content: "All items currently in the cart will be removed.",
+
+      okText: "Clear Cart",
+
+      okType: "danger",
+
+      onOk: () => {
+        setCart([]);
+            setAmountPaid(0);
+      },
+    });
+  };
+
+  const startNewSale = () => {
+    setReceiptOpen(false);
+    setReceipt(null);
+    setSearch("");
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+  };
+
+  useEffect(() => {
+    const isTyping = (target) =>
+      ["INPUT", "TEXTAREA"].includes(target?.tagName) ||
+      target?.isContentEditable;
+
+    const handleShortcut = (event) => {
+      if (event.key === "F2") {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+
+      if (event.key === "Escape") {
+        setSearch("");
+        setReceiptOpen(false);
+        window.setTimeout(() => searchRef.current?.focus(), 0);
+      }
+
+      if (isTyping(event.target)) return;
+
+      if (event.key === "F4") setAmountPaid(total);
+      if (event.key === "F9" && cart.length > 0 && !processing) completeSale();
+
+      if (selectedCartProductId && event.key === "+") {
+        event.preventDefault();
+        increaseQuantity(selectedCartProductId);
+      }
+      if (selectedCartProductId && event.key === "-") {
+        event.preventDefault();
+        decreaseQuantity(selectedCartProductId);
+      }
+      if (selectedCartProductId && event.key === "Delete") {
+        event.preventDefault();
+        removeFromCart(selectedCartProductId);
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+    // The shortcut handler intentionally captures the current POS actions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart, processing, selectedCartProductId, total]);
+
+  // =========================
+  // TEST PRINT
+  // =========================
+
+  const testPrint = async () => {
+    await runPrintJob(async () => {
+      try {
+        const response = await printerFetch("/print", {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          branch:
+            branches.find((branch) => branch._id === selectedBranch)?.name ||
+            "Hardware Store",
+
+          receiptNumber: "TEST-000001",
+
+          date: new Date().toLocaleString("en-PH"),
+
+          cashier: "Test Cashier",
+
+          items: [
+            {
+              name: "Printer Test",
+              quantity: 1,
+              price: 1,
+            },
+          ],
+
+          subtotal: 1,
+          discount: 0,
+          total: 1,
+
+          paymentMethod: "CASH",
+
+          amountPaid: 1,
+          change: 0,
+        }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+          throw new Error(data.error || data.message || "Test print failed.");
+        }
+
+        setPrinterOnline(true);
+
+        message.success("Test receipt printed successfully.");
+      } catch (error) {
+        console.error(error);
+
+        setPrinterOnline(false);
+
+        message.error(error.message || "Printer test failed.");
+      }
+    });
+  };
+
+  // =========================
+  // REPRINT
+  // =========================
+
+  const reprintReceipt = async () => {
+    if (!receipt) return;
+
+    await printReceipt(receipt, true);
+  };
+
+  // =========================
+  // LOADING
+  // =========================
+
+  if (loading) {
+    return (
+      <div className="pos-loading">
+        <div className="pos-loading-header">
+          <Skeleton.Button active size="large" />
+          <Skeleton.Button active size="large" />
+          <Skeleton.Button active size="large" />
+        </div>
+        <Row gutter={[20, 20]} className="pos-loading-main">
+          <Col xs={24} lg={15}>
+            <Card className="pos-loading-card">
+              <Skeleton active paragraph={{ rows: 1 }} title={{ width: "25%" }} />
+              <div className="pos-loading-search"><Skeleton.Input active size="large" /></div>
+              <div className="pos-loading-grid">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton.Button active block key={index} />
+                ))}
+              </div>
+            </Card>
+          </Col>
+          <Col xs={24} lg={9}>
+            <Card className="pos-loading-card pos-loading-cart">
+              <Skeleton active paragraph={{ rows: 1 }} title={{ width: "35%" }} />
+              <Skeleton active paragraph={{ rows: 5 }} title={false} />
+              <Skeleton.Button active block size="large" />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+    );
+  }
+
+  // =========================
+  // UI
+  // =========================
+
+  return (
+    <div className="pos-page">
+      {/* =========================
+          HEADER
+      ========================= */}
+
+      <div className="pos-header">
+        <div className="pos-header-controls">
+          <div className="pos-toolbar-history">
+            <Button icon={<HistoryOutlined />} onClick={openSalesHistory}>
+              Transaction history
+            </Button>
+          </div>
+
+          <div className="pos-branch">
+            <Text type="secondary" className="pos-branch-label">
+              Transaction branch
+            </Text>
+
+            <Select
+              value={selectedBranch || undefined}
+              onChange={setSelectedBranch}
+              size="large"
+              aria-label="Transaction branch"
+              loading={inventoryLoading}
+              style={{
+                minWidth: 260,
+              }}
+              options={branches.map((branch) => ({
+                value: branch._id,
+
+                label: `${branch.code} - ${branch.name}`,
+              }))}
+            />
+          </div>
+
+          {/* PRINTER */}
+
+          <div className="pos-printer">
+            <div
+              className={`printer-status ${
+                printerOnline ? "printer-connected" : "printer-disconnected"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="printer-status-dot" aria-hidden="true" />
+
+              <div>
+                    <strong>Receipt printer</strong>
+
+                <div className="printer-status-text">
+                  {printerOnline
+                    ? selectedPrinter || "Connected"
+                    : "Printer offline"}
+                </div>
+              </div>
+            </div>
+
+            <Select
+              value={selectedPrinter || undefined}
+              aria-label="Receipt printer"
+              placeholder={
+                printerLoading ? "Detecting printer..." : "Select printer"
+              }
+              loading={printerLoading}
+              disabled={printers.length === 0}
+              style={{
+                minWidth: 220,
+              }}
+              onChange={handlePrinterChange}
+              options={printers.map((printer) => ({
+                value: printer.name,
+
+                label: (
+                  <span>
+                    {printer.name}
+
+                    {printer.isDefault && (
+                      <Tag
+                        color="blue"
+                        style={{
+                          marginLeft: 8,
+                        }}
+                      >
+                        Default
+                      </Tag>
+                    )}
+                  </span>
+                ),
+              }))}
+            />
+
+            <Button
+              size="large"
+              icon={<PrinterOutlined />}
+              onClick={testPrint}
+              loading={printing}
+              disabled={!selectedPrinter || !printerOnline || printing}
+              aria-label="Test receipt printer"
+            >
+              {printing ? "Printing..." : "Test"}
+            </Button>
+
+            <Button
+              size="large"
+              onClick={fetchPrinters}
+              loading={printerLoading}
+              aria-label="Refresh receipt printers"
+            >
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* =========================
+          MAIN
+      ========================= */}
+
+      <Row gutter={[20, 20]} className="pos-main">
+        {/* PRODUCTS */}
+
+        <Col xs={24} lg={15}>
+          <Card
+            className="pos-products-card"
+            title={
+              <div className="pos-card-title">
+                <ShoppingCartOutlined />
+
+                <span>Products</span>
+              </div>
+            }
+          >
+            <Input
+              ref={searchRef}
+              size="large"
+              prefix={<SearchOutlined />}
+              suffix={
+                <span
+                  className="barcode-control"
+                  title="Scan or enter a barcode"
+                  aria-label="Barcode scanner input"
+                >
+                  <BarcodeOutlined aria-hidden="true" />
+                </span>
+              }
+              placeholder="Search product, SKU, brand, or barcode..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onPressEnter={(event) => handleProductSearch(event.target.value)}
+              allowClear
+              autoFocus
+            />
+
+            <div className="pos-product-tools">
+              <div
+                className="category-filter"
+                role="group"
+                aria-label="Filter products by category"
+              >
+                {categories.map((category) => (
+                  <Button
+                    key={category}
+                    size="small"
+                    type={selectedCategory === category ? "primary" : "default"}
+                    className={
+                      selectedCategory === category
+                        ? "category-button active"
+                        : "category-button"
+                    }
+                    onClick={() => setSelectedCategory(category)}
+                    aria-pressed={selectedCategory === category}
+                  >
+                    {category}
+                  </Button>
+                ))}
+              </div>
+              {recentProductIds.length > 0 && (
+                <div
+                  className="recent-products"
+                  aria-label="Recently added products"
+                >
+                  <HistoryOutlined />
+                  {recentProductIds.slice(0, 4).map((id) => {
+                    const product = products.find((item) => item._id === id);
+                    return product ? (
+                      <Button
+                        key={id}
+                        size="small"
+                        aria-label={"Add " + product.name + " to current sale"}
+                        onClick={() => addToCart(product)}
+                      >
+                        {product.name}
+                      </Button>
+                    ) : null;
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="pos-product-count">
+              <Text type="secondary">
+                {filteredProducts.length === 0
+                  ? "0 products"
+                  : `Showing ${productPage * productPageSize + 1}-${Math.min((productPage + 1) * productPageSize, filteredProducts.length)} of ${filteredProducts.length} products`}
+              </Text>
+
+              {inventoryLoading && <Spin size="small" />}
+            </div>
+
+            <div className="pos-products-grid">
+              {visibleProducts.map((product) => {
+                const stock = inventoryMap[product._id]?.quantity || 0;
+
+                const inCart = cart.find(
+                  (item) => item.product === product._id,
+                );
+
+                return (
+                  <Card
+                    key={product._id}
+                    className={`pos-product-card ${
+                      stock <= 0 ? "out-of-stock" : ""
+                    } ${inCart ? "in-cart" : ""}`}
+                    hoverable={stock > 0}
+                    role="button"
+                    tabIndex={stock > 0 ? 0 : -1}
+                    aria-label={`${stock > 0 ? "Add" : "Unavailable:"} ${product.name}`}
+                    aria-disabled={stock <= 0}
+                    onClick={() => {
+                      if (stock > 0) {
+                        addToCart(product);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        stock > 0 &&
+                        (event.key === "Enter" || event.key === " ")
+                      ) {
+                        event.preventDefault();
+                        addToCart(product);
+                      }
+                    }}
+                  >
+                    <div className="product-top">
+                      <Tag>{product.brand || "Hardware"}</Tag>
+
+                      {stock <= 0 ? (
+                        <Tag color="red">Out of Stock</Tag>
+                      ) : stock <= 5 ? (
+                        <Tag color="orange">Low Stock</Tag>
+                      ) : null}
+                    </div>
+
+                    <div className="product-name">{product.name}</div>
+
+                    <Text type="secondary">{product.sku}</Text>
+
+                    <div className="product-price">
+                      &#8369;
+                      {Number(product.sellingPrice).toLocaleString("en-PH", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </div>
+
+                    <div className="product-bottom">
+                      <Text type="secondary">
+                        {product.unit ? `Per ${product.unit}` : "Per item"}  -
+                        Stock: <strong>{stock}</strong>
+                      </Text>
+
+                      {inCart && (
+                        <Tag color="blue">In cart: {inCart.quantity}</Tag>
+                      )}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+
+            {filteredProducts.length > productPageSize && (
+              <div className="pos-product-pagination">
+                <Button
+                  icon={<LeftOutlined />}
+                  onClick={() => setProductPage((page) => Math.max(page - 1, 0))}
+                  disabled={productPage === 0}
+                >
+                  Previous
+                </Button>
+                <Text type="secondary">Page {productPage + 1} of {productPageCount}</Text>
+                <Button
+                  icon={<RightOutlined />}
+                  iconPosition="end"
+                  onClick={() => setProductPage((page) => Math.min(page + 1, productPageCount - 1))}
+                  disabled={productPage >= productPageCount - 1}
+                >
+                  Next
+                </Button>
+              </div>
+            )}
+
+            {filteredProducts.length === 0 && (
+              <Empty description="No products found" className="pos-empty" />
+            )}
+          </Card>
+        </Col>
+
+        {/* CART */}
+
+        <Col xs={24} lg={9}>
+          <Card
+            className="pos-cart-card"
+            title={
+              <div className="cart-header">
+                <div className="pos-card-title">
+                  <ShoppingCartOutlined />
+
+                  <span>Current sale</span>
+
+                  <Tag color="blue">{totalItems}</Tag>
+                </div>
+
+                <Button
+                  danger
+                  type="text"
+                  aria-label="Clear current sale"
+                  onClick={clearCart}
+                  disabled={cart.length === 0}
+                >
+                  Clear
+                </Button>
+              </div>
+            }
+          >
+            {cart.length === 0 ? (
+              <Empty
+                image={<ShoppingCartOutlined className="cart-empty-icon" />}
+                description={
+                  <div className="cart-empty-copy">
+                    <strong>Select a product to begin</strong>
+                    <span>Search the catalog or scan a barcode to add items.</span>
+                  </div>
+                }
+                className="cart-empty"
+              />
+            ) : (
+              <div ref={cartItemsRef} className="cart-items">
+                {cart.map((item) => (
+                  <div
+                    className="cart-item"
+                    onClick={() => setSelectedCartProductId(item.product)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedCartProductId(item.product);
+                      }
+                    }}
+                    data-selected={selectedCartProductId === item.product}
+                    data-cart-product-id={item.product}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={selectedCartProductId === item.product}
+                    aria-label={`Select ${item.name} in current sale`}
+                    key={item.product}
+                  >
+                    <div className="cart-item-main">
+                      <div className="cart-item-name">{item.name}</div>
+
+                      <Text type="secondary">{item.sku}</Text>
+
+                      <div className="cart-item-price">
+                        &#8369;
+                        {Number(item.unitPrice).toLocaleString("en-PH", {
+                          minimumFractionDigits: 2,
+                        })}{" "}
+                        / {item.unit}
+                      </div>
+
+                      {item.quantity >= item.available && (
+                        <span className="cart-item-warning" role="status">
+                          Maximum available stock reached
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="cart-item-controls">
+                      <Space.Compact>
+                        <Button
+                          icon={<MinusOutlined />}
+                          aria-label={`Decrease ${item.name} quantity`}
+                          onClick={() => decreaseQuantity(item.product)}
+                        />
+
+                        <InputNumber
+                          min={1}
+                          max={item.available}
+                          value={item.quantity}
+                          onChange={(value) =>
+                            updateQuantity(item.product, value)
+                          }
+                          controls={false}
+                          aria-label={`Quantity for ${item.name}`}
+                          className="cart-quantity"
+                        />
+
+                        <Button
+                          icon={<PlusOutlined />}
+                          aria-label={`Increase ${item.name} quantity`}
+                          onClick={() => increaseQuantity(item.product)}
+                        />
+                      </Space.Compact>
+
+                      <Button
+                        danger
+                        type="text"
+                        icon={<DeleteOutlined />}
+                        aria-label={`Remove ${item.name} from current sale`}
+                        onClick={() => removeFromCart(item.product)}
+                      />
+                    </div>
+
+                    <div className="cart-item-subtotal">
+                      &#8369;
+                      {Number(item.subtotal).toLocaleString("en-PH", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* SUMMARY */}
+
+            <div
+              className={`pos-summary ${
+                cart.length === 0 ? "pos-summary-disabled" : ""
+              }`}
+            >
+              <div className="summary-row">
+                <span>Subtotal</span>
+
+                <strong>
+                  &#8369;
+                  {subtotal.toLocaleString("en-PH", {
+                    minimumFractionDigits: 2,
+                  })}
+                </strong>
+              </div>
+
+              <div className="summary-total">
+                <span>Total</span>
+
+                <strong>
+                  &#8369;
+                  {total.toLocaleString("en-PH", {
+                    minimumFractionDigits: 2,
+                  })}
+                </strong>
+              </div>
+            </div>
+
+            {/* PAYMENT */}
+
+            <div
+              className={`payment-section ${
+                cart.length === 0 ? "payment-section-disabled" : ""
+              }`}
+            >
+              <div className="amount-row">
+                <div>
+                  <Text type="secondary">Amount paid</Text>
+
+                  <InputNumber
+                    size="large"
+                    min={0}
+                    precision={2}
+                    prefix={"\u20B1"}
+                    value={amountPaid}
+                    onChange={(value) => setAmountPaid(value || 0)}
+                    disabled={cart.length === 0}
+                    style={{
+                      width: "100%",
+                    }}
+                  />
+
+                  {paymentMethod === "CASH" && (
+                    <div
+                      className="quick-tender"
+                      aria-label="Quick cash amount"
+                    >
+                      <Button
+                        className={
+                          amountPaid === total && total > 0
+                            ? "quick-tender-selected"
+                            : ""
+                        }
+                        disabled={cart.length === 0}
+                        aria-pressed={amountPaid === total && total > 0}
+                        onClick={() => setAmountPaid(total)}
+                      >
+                        Exact amount
+                      </Button>
+                      {[100, 200, 500, 1000].map((amount) => (
+                        <Button
+                          key={amount}
+                          className={
+                            amountPaid === amount
+                              ? "quick-tender-selected"
+                              : ""
+                          }
+                          disabled={cart.length === 0}
+                          aria-pressed={amountPaid === amount}
+                          onClick={() => setAmountPaid(amount)}
+                        >
+                          &#8369;{amount.toLocaleString("en-PH")}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <Text type="secondary">Change</Text>
+
+                  <div
+                    className={`change-display ${amountPaid >= total && total > 0 ? "change-ready" : ""}`}
+                  >
+                    &#8369;
+                    {change.toLocaleString("en-PH", {
+                      minimumFractionDigits: 2,
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="checkout-action-slot">
+              {cart.length === 0 ? (
+                <div className="checkout-disabled-note">
+                  Add an item to enable checkout.
+                </div>
+              ) : (
+                <Button
+                  type="primary"
+                  size="large"
+                  block
+                  className="complete-sale-button"
+                  loading={processing}
+                  disabled={
+                    !selectedBranch ||
+                    amountPaid < total
+                  }
+                  onClick={completeSale}
+                >
+                  {amountPaid < total
+                    ? "Enter sufficient cash"
+                    : `Pay \u20B1${total.toLocaleString("en-PH", { minimumFractionDigits: 2 })}`}
+                </Button>
+              )}
+            </div>
+
+            <Text className="checkout-help" type="secondary">
+              F2 Search  -  F4 Cash  -  F5 GCash  -  F6 Card  -  F9 Pay
+            </Text>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* TRANSACTION HISTORY */}
+
+      <Modal
+        title="Transaction History"
+        open={salesHistoryOpen}
+        onCancel={() => setSalesHistoryOpen(false)}
+        footer={null}
+        width={900}
+      >
+        <Input
+          allowClear
+          placeholder="Search receipt number, branch, cashier, or payment method"
+          value={salesHistorySearch}
+          onChange={(event) => setSalesHistorySearch(event.target.value)}
+          style={{ marginBottom: 16 }}
+        />
+        <Table
+          rowKey="_id"
+          loading={salesHistoryLoading}
+          dataSource={filteredSalesHistory}
+          pagination={{ pageSize: 8 }}
+          scroll={{ x: 720 }}
+          columns={[
+            {
+              title: "Receipt",
+              dataIndex: "receiptNumber",
+              key: "receiptNumber",
+            },
+            {
+              title: "Date",
+              key: "createdAt",
+              render: (_, sale) => new Date(sale.createdAt).toLocaleString("en-PH"),
+            },
+            {
+              title: "Branch",
+              key: "branch",
+              render: (_, sale) => sale.branch?.name || "-",
+            },
+            {
+              title: "Sold By",
+              key: "cashier",
+              render: (_, sale) => sale.cashier?.name || "-",
+            },
+            {
+              title: "Total",
+              key: "totalAmount",
+              render: (_, sale) => `\u20B1${Number(sale.totalAmount).toLocaleString("en-PH", { minimumFractionDigits: 2 })}`,
+            },
+            {
+              title: "Payment",
+              dataIndex: "paymentMethod",
+              key: "paymentMethod",
+            },
+            {
+              title: "Status",
+              dataIndex: "status",
+              key: "status",
+              render: (status) => <Tag color={status === "REFUNDED" ? "red" : status === "PARTIALLY_REFUNDED" ? "orange" : "green"}>{String(status || "COMPLETED").replaceAll("_", " ")}</Tag>,
+            },
+            {
+              title: "Action",
+              key: "action",
+              render: (_, sale) => (
+                <Space wrap>
+                  <Button
+                    icon={<PrinterOutlined />}
+                    loading={printing}
+                    disabled={!printerOnline || printing}
+                    onClick={() => {
+                      setReceipt(sale);
+                      setReceiptOpen(true);
+                      printReceipt(sale, true);
+                    }}
+                  >
+                    Reprint
+                  </Button>
+                  {sale.status !== "REFUNDED" && sale.status !== "VOIDED" && (
+                    <Button icon={<RollbackOutlined />} onClick={() => openRefund(sale)}>
+                      Return
+                    </Button>
+                  )}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Modal>
+
+      <Modal
+        title={`Return items - ${refundSale?.receiptNumber || "Sale"}`}
+        open={Boolean(refundSale)}
+        onCancel={() => {
+          if (!refundSaving) {
+            setRefundSale(null);
+            refundForm.resetFields();
+          }
+        }}
+        footer={null}
+        width={650}
+      >
+        {refundSale && (
+          <Form form={refundForm} layout="vertical" onFinish={handleRefund}>
+            <Text type="secondary">Choose the quantities being returned. The refund restores those units to the sale branch inventory.</Text>
+            <div className="pos-refund-items">
+              {refundSale.items.map((item, index) => {
+                const remaining = Math.max(Number(item.quantity || 0) - Number(item.refundedQuantity || 0), 0);
+                return (
+                  <div className="pos-refund-row" key={item._id || item.product?._id || index}>
+                    <div>
+                      <strong>{item.product?.name || "Product"}</strong>
+                      <Text type="secondary">Sold: {item.quantity} · Already returned: {item.refundedQuantity || 0} · Remaining: {remaining}</Text>
+                    </div>
+                    <Form.Item name={["items", index, "quantity"]} initialValue={0} rules={[{ type: "number", min: 0, max: remaining, message: `Maximum ${remaining}.` }]}>
+                      <InputNumber min={0} max={remaining} disabled={remaining === 0} />
+                    </Form.Item>
+                  </div>
+                );
+              })}
+            </div>
+            <Form.Item label="Reason" name="reason" rules={[{ required: true, message: "Enter a refund reason." }]}>
+              <Input placeholder="Customer return, damaged item, wrong item..." />
+            </Form.Item>
+            {!canRefundDirectly && (
+              <Form.Item
+                label="Manager approval PIN"
+                name="approvalPin"
+                rules={[
+                  { required: true, message: "Enter the manager PIN." },
+                  { pattern: /^\d{4,6}$/, message: "Use a 4 to 6 digit PIN." },
+                ]}
+              >
+                <Input.Password inputMode="numeric" maxLength={6} placeholder="Enter manager PIN" />
+              </Form.Item>
+            )}
+            <div className="product-modal-footer">
+              <Button onClick={() => setRefundSale(null)} disabled={refundSaving}>Cancel</Button>
+              <Button type="primary" htmlType="submit" loading={refundSaving}>Confirm refund</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* RECEIPT */}
+
+      <Modal
+        title="Sale Completed"
+        open={receiptOpen}
+        onCancel={() => startNewSale()}
+        footer={[
+          <Button
+            key="reprint"
+            icon={<PrinterOutlined />}
+            onClick={reprintReceipt}
+            loading={printing}
+            disabled={!printerOnline || printing}
+          >
+            {printing ? "Printing..." : "Reprint"}
+          </Button>,
+
+          <Button key="new-sale" type="primary" onClick={startNewSale}>
+            New Sale
+          </Button>,
+        ]}
+        width={500}
+      >
+        {receipt && (
+          <div className="receipt">
+            {Number(receipt.changeAmount) > 0 && (
+              <div className="receipt-change-hero">
+                <span>CHANGE DUE</span>
+                <strong>
+                  &#8369;
+                  {Number(receipt.changeAmount).toLocaleString("en-PH", {
+                    minimumFractionDigits: 2,
+                  })}
+                </strong>
+              </div>
+            )}
+
+            <div className="receipt-header">
+              <Title level={3}>HARDWARE STORE</Title>
+
+              <Text>{receipt.branch?.name}</Text>
+
+              <Text type="secondary">Official Sales Receipt</Text>
+            </div>
+
+            <div className="receipt-info">
+              <div>
+                <span>Receipt</span>
+
+                <strong>{receipt.receiptNumber}</strong>
+              </div>
+
+              <div>
+                <span>Date</span>
+
+                <strong>
+                  {new Date(receipt.createdAt).toLocaleString("en-PH")}
+                </strong>
+              </div>
+            </div>
+
+            <div className="receipt-info">
+              <div>
+                <span>Cashier</span>
+
+                <strong>{receipt.cashier?.name || "Cashier"}</strong>
+              </div>
+            </div>
+
+            <div className="receipt-items">
+              {receipt.items?.map((item) => (
+                <div className="receipt-item" key={item._id}>
+                  <div>
+                    <strong>{item.product?.name}</strong>
+
+                    <Text type="secondary">
+                      {item.quantity} x &#8369;
+                      {Number(item.unitPrice).toLocaleString("en-PH", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </Text>
+                  </div>
+
+                  <strong>
+                    &#8369;
+                    {Number(item.subtotal).toLocaleString("en-PH", {
+                      minimumFractionDigits: 2,
+                    })}
+                  </strong>
+                </div>
+              ))}
+            </div>
+
+            <div className="receipt-total-row">
+              <span>Subtotal</span>
+
+              <span>
+                &#8369;
+                {Number(receipt.subtotal).toLocaleString("en-PH", {
+                  minimumFractionDigits: 2,
+                })}
+              </span>
+            </div><div className="receipt-grand-total">
+              <span>TOTAL</span>
+
+              <strong>
+                &#8369;
+                {Number(receipt.totalAmount).toLocaleString("en-PH", {
+                  minimumFractionDigits: 2,
+                })}
+              </strong>
+            </div>
+
+            <div className="receipt-payment">
+              <div>
+                <span>Payment</span>
+
+                <strong>{receipt.paymentMethod}</strong>
+              </div>
+
+              <div>
+                <span>Amount Paid</span>
+
+                <strong>
+                  &#8369;
+                  {Number(receipt.amountPaid).toLocaleString("en-PH", {
+                    minimumFractionDigits: 2,
+                  })}
+                </strong>
+              </div>
+
+              <div>
+                <span>Change</span>
+
+                <strong>
+                  &#8369;
+                  {Number(receipt.changeAmount).toLocaleString("en-PH", {
+                    minimumFractionDigits: 2,
+                  })}
+                </strong>
+              </div>
+            </div>
+
+            <div className="receipt-footer">
+              Thank you for your purchase!
+              <br />
+              Please come again.
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+export default POS;

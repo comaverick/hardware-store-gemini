@@ -1,0 +1,298 @@
+import { Matrix4, Vector3 } from "three";
+
+// WebXR depth becomes especially noisy inside arm's reach on phones that infer
+// depth from motion. ScanSpace is a room scanner, so samples closer than this
+// are more likely to be hands, motion artifacts, or invalid near-field depth
+// than useful wall geometry.
+export const MIN_ROOM_DEPTH_METERS = 0.45;
+
+export async function detectCapabilities(
+  nav = navigator,
+  secure = window.isSecureContext,
+) {
+  const result = {
+    secure,
+    ar: false,
+    browser: nav.userAgent || "Unknown browser",
+    error: "",
+  };
+  if (!secure)
+    return { ...result, error: "Open ScanSpace over HTTPS to scan a room." };
+  if (!nav.xr)
+    return {
+      ...result,
+      error:
+        "This browser does not offer room scanning. You can still enter measurements.",
+    };
+  try {
+    result.ar = await nav.xr.isSessionSupported("immersive-ar");
+  } catch (error) {
+    result.error = error.message;
+  }
+  return result;
+}
+
+export function viewSampleGrid(view, withColor = false) {
+  const matrix = view?.projectionMatrix;
+  const projectedAspect =
+    matrix?.length === 16 && Math.abs(matrix[0]) > 0.00001
+      ? Math.abs(matrix[5] / matrix[0])
+      : 4 / 3;
+  const aspect = Math.max(
+    0.4,
+    Math.min(2.5, Number.isFinite(projectedAspect) ? projectedAspect : 4 / 3),
+  );
+  // The RGB-D path keeps a denser grid so close inspection does not expose
+  // one large polygon for every coarse depth sample. The extra samples also
+  // give the TSDF more stable support around thin shelves and wall edges.
+  // Colorless fallback capture stays smaller for constrained devices.
+  const longSide = withColor ? 96 : 64;
+  if (aspect >= 1)
+    return {
+      columns: longSide,
+      rows: Math.max(28, Math.round(longSide / aspect)),
+    };
+  return {
+    columns: Math.max(28, Math.round(longSide * aspect)),
+    rows: longSide,
+  };
+}
+
+// Depth is distance along the XR view's camera Z axis, not radial distance
+// along a normalized ray. getDepthInMeters accepts normalized XR-view
+// coordinates and applies normDepthBufferFromNormView internally. The returned
+// value must therefore be unprojected with the same XR view coordinates and
+// matrices; applying the native depth-buffer transform to the ray a second
+// time rotates/crops the geometry away from the grid cell that owns it.
+export function unprojectDepth(
+  depth,
+  view,
+  columns = 56,
+  rows = 42,
+  colorAt = null,
+) {
+  const inverse = new Matrix4().fromArray(view.projectionMatrix).invert();
+  const pose = new Matrix4().fromArray(view.transform.matrix);
+  const points = [],
+    ray = new Vector3();
+  for (let y = 0; y < rows; y++)
+    for (let x = 0; x < columns; x++) {
+      const u = (x + 0.5) / columns,
+        v = (y + 0.5) / rows;
+      const meters = depth.getDepthInMeters(u, v);
+      if (
+        !Number.isFinite(meters) ||
+        meters < MIN_ROOM_DEPTH_METERS ||
+        meters > 8
+      )
+        continue;
+      ray
+        .set(u * 2 - 1, 1 - v * 2, 0.5)
+        .applyMatrix4(inverse);
+      if (ray.z >= -0.00001) continue;
+      ray.multiplyScalar(meters / -ray.z).applyMatrix4(pose);
+      if (![ray.x, ray.y, ray.z].every(Number.isFinite)) continue;
+      const color = colorAt?.(u, v);
+      points.push({
+        x: ray.x,
+        y: ray.y,
+        z: ray.z,
+        depth: meters,
+        color,
+        gridX: x,
+        gridY: y,
+        gridColumns: columns,
+        gridRows: rows,
+      });
+    }
+  return points;
+}
+
+export class VoxelCloud {
+  constructor(size = 0.08, limit = 60000, maxSize = 0.18) {
+    this.size = size;
+    this.limit = limit;
+    this.maxSize = maxSize;
+    this.cells = new Map();
+    this.full = false;
+    this.compactions = 0;
+    this.repeatedCells = 0;
+  }
+  key(p) {
+    return `${Math.floor(p.x / this.size)},${Math.floor(p.y / this.size)},${Math.floor(p.z / this.size)}`;
+  }
+  compact() {
+    if (this.size >= this.maxSize) return false;
+    const nextSize = Math.min(this.maxSize, this.size * 1.35);
+    const compacted = new Map();
+    for (const point of this.cells.values()) {
+      const key = `${Math.floor(point.x / nextSize)},${Math.floor(
+        point.y / nextSize,
+      )},${Math.floor(point.z / nextSize)}`;
+      const current = compacted.get(key);
+      if (!current) compacted.set(key, { ...point });
+      else {
+        const weight = point.hits / (current.hits + point.hits);
+        ["x", "y", "z"].forEach((name) => {
+          current[name] += (point[name] - current[name]) * weight;
+        });
+        if (point.color)
+          current.color = current.color
+            ? current.color.map(
+                (value, index) => value + (point.color[index] - value) * weight,
+              )
+            : point.color;
+        // Spatial merging is not another observation. Summing hits made two
+        // neighboring samples from a single frame appear repeat-confirmed.
+        current.hits = Math.max(current.hits, point.hits);
+        current.frameId = Math.max(current.frameId, point.frameId);
+      }
+    }
+    this.size = nextSize;
+    this.cells = compacted;
+    this.repeatedCells = [...compacted.values()].filter(
+      (point) => point.hits >= 2,
+    ).length;
+    this.compactions++;
+    return true;
+  }
+  add(points, frameId, viewpoint = null) {
+    for (const p of points) {
+      if (![p.x, p.y, p.z].every((v) => Number.isFinite(v) && Math.abs(v) < 60))
+        continue;
+      let key = this.key(p),
+        previous = this.cells.get(key);
+      if (!previous && this.cells.size >= this.limit * 0.92) {
+        this.compact();
+        key = this.key(p);
+        previous = this.cells.get(key);
+      }
+      if (previous) {
+        if (previous.frameId === frameId) continue;
+        previous.frameId = frameId;
+        // A turn from the same spot is useful for looking at another wall, but
+        // it is not an independent geometric observation of an overlapping
+        // surface. Require camera translation before marking a voxel stable.
+        if (
+          viewpoint &&
+          Number.isFinite(previous.viewX) &&
+          Math.hypot(
+            viewpoint[0] - previous.viewX,
+            viewpoint[1] - previous.viewY,
+            viewpoint[2] - previous.viewZ,
+          ) < 0.04
+        )
+          continue;
+        if (previous.hits === 1) this.repeatedCells++;
+        previous.hits++;
+        const weight = 1 / Math.min(previous.hits, 8);
+        ["x", "y", "z"].forEach((k) => {
+          previous[k] += (p[k] - previous[k]) * weight;
+        });
+        if (p.color)
+          previous.color = previous.color
+            ? previous.color.map((v, i) => v + (p.color[i] - v) * weight)
+            : p.color;
+      } else if (this.cells.size < this.limit)
+        this.cells.set(key, {
+          ...p,
+          frameId,
+          hits: 1,
+          viewX: viewpoint?.[0],
+          viewY: viewpoint?.[1],
+          viewZ: viewpoint?.[2],
+        });
+      else this.full = this.size >= this.maxSize;
+    }
+  }
+  // Compare a new depth view with the points already accumulated in the
+  // preview. A correctly tracked camera should land close to existing cells
+  // wherever the views overlap. A second, shifted wall layer instead appears
+  // as a dense group of nearby points with a large residual. Keep this query
+  // bounded because it runs on the phone while the scan is live.
+  overlapConsistency(points, { radius = 0.16, maximumSamples = 480 } = {}) {
+    if (!points?.length || !this.cells.size)
+      return {
+        sampled: 0,
+        compared: 0,
+        matched: 0,
+        overlapRatio: 0,
+        matchedRatio: 0,
+        medianDistance: null,
+        upperDistance: null,
+      };
+    const stride = Math.max(1, Math.ceil(points.length / maximumSamples));
+    const cellRadius = Math.max(1, Math.ceil(radius / this.size));
+    const distances = [];
+    let sampled = 0;
+    let compared = 0;
+    for (let index = 0; index < points.length; index += stride) {
+      const point = points[index];
+      if (![point?.x, point?.y, point?.z].every(Number.isFinite)) continue;
+      sampled++;
+      const x = Math.floor(point.x / this.size);
+      const y = Math.floor(point.y / this.size);
+      const z = Math.floor(point.z / this.size);
+      let nearest = Infinity;
+      for (let dx = -cellRadius; dx <= cellRadius; dx++)
+        for (let dy = -cellRadius; dy <= cellRadius; dy++)
+          for (let dz = -cellRadius; dz <= cellRadius; dz++) {
+            const candidate = this.cells.get(`${x + dx},${y + dy},${z + dz}`);
+            if (!candidate) continue;
+            nearest = Math.min(
+              nearest,
+              Math.hypot(
+                point.x - candidate.x,
+                point.y - candidate.y,
+                point.z - candidate.z,
+              ),
+            );
+          }
+      if (!Number.isFinite(nearest)) continue;
+      compared++;
+      if (nearest <= radius) distances.push(nearest);
+    }
+    if (!distances.length)
+      return { sampled, compared, matched: 0, overlapRatio: 0, matchedRatio: 0, medianDistance: null, upperDistance: null };
+    distances.sort((a, b) => a - b);
+    return {
+      sampled,
+      compared,
+      matched: distances.length,
+      overlapRatio: distances.length / Math.max(1, sampled),
+      matchedRatio: distances.length / Math.max(1, compared),
+      medianDistance: distances[Math.floor(distances.length / 2)],
+      upperDistance: distances[Math.floor((distances.length - 1) * 0.75)],
+    };
+  }
+  previewStableCount() {
+    return this.repeatedCells;
+  }
+  confirmedRatio(points, totalSamples = points?.length || 0) {
+    if (!points?.length) return 0;
+    const confirmed = points.reduce((count, point) => {
+      const stored = this.cells.get(this.key(point));
+      return count + (stored?.hits >= 2 ? 1 : 0);
+    }, 0);
+    return confirmed / Math.max(1, totalSamples, points.length);
+  }
+  values(filtered = false) {
+    const all = [...this.cells.values()];
+    if (!filtered) return all;
+    return all.filter((p) => {
+      const [x, y, z] = this.key(p).split(",").map(Number);
+      let neighbors = 0;
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dz = -1; dz <= 1; dz++)
+            if (
+              (dx || dy || dz) &&
+              this.cells.has(`${x + dx},${y + dy},${z + dz}`)
+            )
+              neighbors++;
+      // A repeated voxel is stable; a dense, adjacent surface patch is also
+      // stable even if its individual samples were only seen once while moving.
+      return p.hits >= 2 || neighbors >= 4;
+    });
+  }
+}
