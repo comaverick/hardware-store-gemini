@@ -189,7 +189,7 @@ export function selectTextureKeyframesForRetention(
         0,
         Math.min(3, qualities.get(index) / referenceQuality),
       );
-      const utility = Math.min(4, nearest) + normalizedQuality * 0.35;
+      const utility = Math.min(3, nearest) + normalizedQuality * 1.25;
       const quality = qualities.get(index);
       if (
         utility < lowestUtility - 1e-6 ||

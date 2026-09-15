@@ -2514,6 +2514,81 @@ export function pruneUnsupportedMeshBridges(mesh, voxelSize, options = {}) {
   };
 }
 
+// Remove exposed boundary fin/spike triangles that have 2 or more boundary edges.
+// These spikes occur along open scan fringes (e.g. wall top, partial ceiling)
+// creating jagged sawtooth teeth.
+export function pruneBoundarySpikes(mesh, maxPasses = 2) {
+  let indices = mesh.indices;
+  const positions = mesh.positions;
+  let removedTotal = 0;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edgeUse = new Map();
+    for (let index = 0; index < indices.length; index += 3) {
+      const a = indices[index];
+      const b = indices[index + 1];
+      const c = indices[index + 2];
+      const e1 = a < b ? `${a},${b}` : `${b},${a}`;
+      const e2 = b < c ? `${b},${c}` : `${c},${b}`;
+      const e3 = c < a ? `${c},${a}` : `${a},${c}`;
+      edgeUse.set(e1, (edgeUse.get(e1) || 0) + 1);
+      edgeUse.set(e2, (edgeUse.get(e2) || 0) + 1);
+      edgeUse.set(e3, (edgeUse.get(e3) || 0) + 1);
+    }
+    const kept = [];
+    let passRemoved = 0;
+    for (let index = 0; index < indices.length; index += 3) {
+      const a = indices[index];
+      const b = indices[index + 1];
+      const c = indices[index + 2];
+      const e1 = a < b ? `${a},${b}` : `${b},${a}`;
+      const e2 = b < c ? `${b},${c}` : `${c},${b}`;
+      const e3 = c < a ? `${c},${a}` : `${a},${c}`;
+      const b1 = edgeUse.get(e1) === 1;
+      const b2 = edgeUse.get(e2) === 1;
+      const b3 = edgeUse.get(e3) === 1;
+      const boundaryCount = (b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0);
+      if (boundaryCount >= 3) {
+        passRemoved++;
+        continue;
+      }
+      if (boundaryCount === 2) {
+        let s = -1, v1 = -1, v2 = -1;
+        if (b1 && b2) { s = b; v1 = a; v2 = c; }
+        else if (b2 && b3) { s = c; v1 = b; v2 = a; }
+        else if (b3 && b1) { s = a; v1 = c; v2 = b; }
+        if (s >= 0) {
+          const u = [
+            positions[v1 * 3] - positions[s * 3],
+            positions[v1 * 3 + 1] - positions[s * 3 + 1],
+            positions[v1 * 3 + 2] - positions[s * 3 + 2],
+          ];
+          const v = [
+            positions[v2 * 3] - positions[s * 3],
+            positions[v2 * 3 + 1] - positions[s * 3 + 1],
+            positions[v2 * 3 + 2] - positions[s * 3 + 2],
+          ];
+          const lenU = Math.hypot(...u) || 1e-6;
+          const lenV = Math.hypot(...v) || 1e-6;
+          const cosAngle = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (lenU * lenV);
+          if (cosAngle > 0.42) {
+            passRemoved++;
+            continue;
+          }
+        }
+      }
+      kept.push(a, b, c);
+    }
+    removedTotal += passRemoved;
+    indices = new Uint32Array(kept);
+    if (passRemoved === 0) break;
+  }
+  return {
+    ...mesh,
+    indices,
+    removedBoundarySpikes: removedTotal,
+  };
+}
+
 export function meshFragmentationIsUnacceptable(surface) {
   return (
     (surface.keptComponentCount || 0) > 8 &&
@@ -2855,8 +2930,8 @@ export function measuredSurfaceQualityDiagnostics(mesh, gridSize = 20) {
     competingLayerCoverage,
     competingLayerOverlapRatio,
     duplicateLayerLikely:
-      competingLayerCoverage >= 0.2 &&
-      competingLayerOverlapRatio >= 0.55,
+      competingLayerCoverage >= 0.15 &&
+      competingLayerOverlapRatio >= 0.45,
     enclosedEmptyCells,
     interiorMissingRatio:
       enclosedEmptyCells / Math.max(1, occupiedCells + enclosedEmptyCells),
@@ -3026,7 +3101,7 @@ export function meshOutsideRectangularRoomModel(diagnostics) {
   );
 }
 
-function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
+export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
   const groups = new Map();
   let verticalArea = 0;
   for (let index = 0; index < mesh.indices.length; index += 3) {
@@ -3078,10 +3153,9 @@ function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
     groups.set(key, group);
     verticalArea += area;
   }
-  const planes = [...groups.values()]
-    .filter((group) => group.area >= Math.max(0.22, verticalArea * 0.1))
+  const rawPlanes = [...groups.values()]
+    .filter((group) => group.area >= Math.max(0.18, verticalArea * 0.08))
     .sort((left, right) => right.area - left.area)
-    .slice(0, maxPlanes)
     .map((group) => {
       const length = Math.hypot(group.nx, group.ny, group.nz) || 1;
       return {
@@ -3089,12 +3163,58 @@ function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
         ny: group.ny / length,
         nz: group.nz / length,
         offset: group.offset / group.area,
+        area: group.area,
       };
     });
+  const planes = [];
+  for (const candidate of rawPlanes) {
+    let duplicateOf = null;
+    for (const existing of planes) {
+      const dot =
+        candidate.nx * existing.nx +
+        candidate.ny * existing.ny +
+        candidate.nz * existing.nz;
+      const offsetDiff = Math.abs(candidate.offset - existing.offset);
+      // Merge candidate duplicate sheets: similar normal and within 35cm
+      if (Math.abs(dot) >= 0.88 && offsetDiff <= 0.35) {
+        duplicateOf = existing;
+        break;
+      }
+    }
+    if (!duplicateOf) {
+      if (planes.length < maxPlanes) {
+        planes.push({ ...candidate });
+      }
+    } else {
+      const dot =
+        candidate.nx * duplicateOf.nx +
+        candidate.ny * duplicateOf.ny +
+        candidate.nz * duplicateOf.nz;
+      const sign = dot >= 0 ? 1 : -1;
+      const totalArea = duplicateOf.area + candidate.area;
+      duplicateOf.nx =
+        (duplicateOf.nx * duplicateOf.area + candidate.nx * sign * candidate.area) /
+        totalArea;
+      duplicateOf.ny =
+        (duplicateOf.ny * duplicateOf.area + candidate.ny * sign * candidate.area) /
+        totalArea;
+      duplicateOf.nz =
+        (duplicateOf.nz * duplicateOf.area + candidate.nz * sign * candidate.area) /
+        totalArea;
+      const length = Math.hypot(duplicateOf.nx, duplicateOf.ny, duplicateOf.nz) || 1;
+      duplicateOf.nx /= length;
+      duplicateOf.ny /= length;
+      duplicateOf.nz /= length;
+      duplicateOf.offset =
+        (duplicateOf.offset * duplicateOf.area + candidate.offset * sign * candidate.area) /
+        totalArea;
+      duplicateOf.area = totalArea;
+    }
+  }
   if (!planes.length) return { ...mesh, stabilizedPlaneCount: 0 };
   const positions = new Float32Array(mesh.positions);
   const normals = computeNormals(mesh);
-  const distanceLimit = Math.max(0.035, voxelSize * 0.8);
+  const distanceLimit = Math.min(0.22, Math.max(0.08, voxelSize * 4.5));
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const normalOffset = vertex * 3;
     if (Math.abs(normals[normalOffset + 1]) > 0.38) continue;
@@ -3115,9 +3235,10 @@ function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
       if (!best || Math.abs(distance) < Math.abs(best.distance)) best = { plane, distance };
     });
     if (!best) continue;
-    positions[normalOffset] -= best.plane.nx * best.distance * 0.78;
-    positions[normalOffset + 1] -= best.plane.ny * best.distance * 0.78;
-    positions[normalOffset + 2] -= best.plane.nz * best.distance * 0.78;
+    const pullFactor = Math.abs(best.distance) > 0.05 ? 0.95 : 0.85;
+    positions[normalOffset] -= best.plane.nx * best.distance * pullFactor;
+    positions[normalOffset + 1] -= best.plane.ny * best.distance * pullFactor;
+    positions[normalOffset + 2] -= best.plane.nz * best.distance * pullFactor;
   }
   return { ...mesh, positions, stabilizedPlaneCount: planes.length };
 }
@@ -3131,8 +3252,8 @@ export function stabilizeMeasuredWallSectors(mesh, walls = [], voxelSize = 0.03)
       wall?.dominantNormal &&
       Number.isFinite(wall.wallOffset) &&
       wall.bounds &&
-      wall.dominantOrientationRatio >= 0.38 &&
-      wall.dominantLayerRatio >= 0.55,
+      wall.dominantOrientationRatio >= 0.35 &&
+      (wall.dominantLayerRatio >= 0.45 || wall.duplicateLayerLikely),
   );
   if (!supported.length)
     return { ...mesh, stabilizedPlaneCount: 0, stabilizedVertexCount: 0 };
@@ -3157,7 +3278,7 @@ export function stabilizeMeasuredWallSectors(mesh, walls = [], voxelSize = 0.03)
   // Correct ordinary depth ripple, but never collapse a nearby second sheet
   // onto the wall. The previous 10 cm radius could merge pose-drift layers or
   // shallow trim with the fitted plane and create coincident triangles.
-  const distanceLimit = clamp(voxelSize * 2.6, 0.045, 0.065);
+  const distanceLimit = clamp(voxelSize * 3.0, 0.05, 0.08);
   const extentMargin = Math.max(0.025, voxelSize * 1.2);
   let stabilizedVertexCount = 0;
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
@@ -3209,7 +3330,7 @@ export function stabilizeMeasuredWallSectors(mesh, walls = [], voxelSize = 0.03)
     neighbourResiduals.sort((left, right) => left - right);
     const medianResidual =
       neighbourResiduals[Math.floor(neighbourResiduals.length / 2)];
-    if (medianResidual > distanceLimit * 0.7) continue;
+    if (medianResidual > distanceLimit * 0.8) continue;
     // Check if adjacent vertices have diverging normals (curved drapes, cloth folds, or decor)
     const neighbourNormals = [...adjacency[vertex]]
       .map((neighbour) => {
@@ -3262,7 +3383,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
     const ny = ab[2] * ac[0] - ab[0] * ac[2];
     const nz = ab[0] * ac[1] - ab[1] * ac[0];
     const twiceArea = Math.hypot(nx, ny, nz);
-    if (twiceArea < 0.00001 || Math.abs(ny / twiceArea) < 0.88) continue;
+    if (twiceArea < 0.00001 || Math.abs(ny / twiceArea) < 0.72) continue;
     const area = twiceArea * 0.5;
     const height =
       (mesh.positions[a + 1] + mesh.positions[b + 1] + mesh.positions[c + 1]) /
@@ -3279,7 +3400,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
 
   samples.sort((left, right) => left.height - right.height);
   const clusters = [];
-  const clusterDistance = Math.max(0.045, voxelSize * 1.8);
+  const clusterDistance = Math.max(0.065, voxelSize * 2.2);
   samples.forEach((sample) => {
     const cluster = clusters[clusters.length - 1];
     if (!cluster || Math.abs(sample.height - cluster.height) > clusterDistance) {
@@ -3320,11 +3441,11 @@ export function stabilizeMeasuredHorizontalSurfaces(
     adjacency[b].add(a); adjacency[b].add(c);
     adjacency[c].add(a); adjacency[c].add(b);
   }
-  const distanceLimit = Math.max(0.035, voxelSize * 1.55);
+  const distanceLimit = clamp(voxelSize * 2.8, 0.05, 0.10);
   let stabilizedHorizontalVertexCount = 0;
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const offset = vertex * 3;
-    if (Math.abs(normals[offset + 1]) < 0.78) continue;
+    if (Math.abs(normals[offset + 1]) < 0.68) continue;
     let closest = null;
     planes.forEach((height) => {
       const distance = positions[offset + 1] - height;
@@ -3338,10 +3459,10 @@ export function stabilizeMeasuredHorizontalSurfaces(
       .sort((left, right) => left - right);
     if (
       residuals.length < 2 ||
-      residuals[Math.floor(residuals.length / 2)] > distanceLimit * 0.7
+      residuals[Math.floor(residuals.length / 2)] > distanceLimit * 0.85
     )
       continue;
-    positions[offset + 1] -= closest * 0.92;
+    positions[offset + 1] -= closest * 0.95;
     stabilizedHorizontalVertexCount++;
   }
   return {
@@ -3416,8 +3537,8 @@ export function smoothPositions(mesh, passes = 2, voxelSize = 0.03) {
     boundaryNeighbors[a].push(b);
     boundaryNeighbors[b].push(a);
   });
-  const maxBoundaryShift = Math.max(0.015, voxelSize * 0.45);
-  for (let bPass = 0; bPass < Math.min(2, passes); bPass++) {
+  const maxBoundaryShift = Math.max(0.02, voxelSize * 0.55);
+  for (let bPass = 0; bPass < Math.min(3, Math.max(2, passes)); bPass++) {
     const nextPositions = new Float32Array(positions);
     for (let vertex = 0; vertex < count; vertex++) {
       const bn = boundaryNeighbors[vertex];
@@ -3426,7 +3547,7 @@ export function smoothPositions(mesh, passes = 2, voxelSize = 0.03) {
       for (let axis = 0; axis < 3; axis++) {
         const mid = (positions[n1 * 3 + axis] + positions[n2 * 3 + axis]) * 0.5;
         const current = positions[vertex * 3 + axis];
-        const shift = clamp((mid - current) * 0.28, -maxBoundaryShift, maxBoundaryShift);
+        const shift = clamp((mid - current) * 0.35, -maxBoundaryShift, maxBoundaryShift);
         nextPositions[vertex * 3 + axis] = current + shift;
       }
     }
@@ -3937,7 +4058,7 @@ function buildAtlas(frames, precomputedCalibration = null) {
     .sort((left, right) => left - right);
   const upperQuality =
     rankedQuality[Math.floor(rankedQuality.length * 0.75)] || 0;
-  const qualityFloor = Math.max(10, upperQuality * 0.56);
+  const qualityFloor = Math.max(16, upperQuality * 0.70);
   const lowQualityFrames = candidates.filter(
     (frame) => frame.textureQuality < qualityFloor,
   ).length;
@@ -4386,6 +4507,7 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
         0,
         1.8,
       );
+      const blurPenalty = sharpness < 0.85 ? (0.85 - sharpness) * 2.2 : 0;
       candidates.push({
         frame,
         projections: colorProjections,
@@ -4394,11 +4516,12 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
           frame.textureQuality >= atlas.textureQualityFloor &&
           frameClippingPenalty <= 0.2,
         score:
-          facing * 1.45 +
+          facing * 1.15 +
           Math.min(2, 1 / distance) * 0.65 +
-          sharpness * 0.28 +
-          quality * 1.05 +
-          localSharpness * 0.55 -
+          sharpness * 1.25 +
+          quality * 1.15 +
+          localSharpness * 1.1 -
+          blurPenalty -
           worstAgreement * 5 -
           Math.max(0, farthestRecovery - 1) * 0.18 -
           motionPenalty * 0.68 -
@@ -4515,17 +4638,19 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
           0.2,
           1.8,
         );
+        const blurPenalty = sharpness < 0.85 ? (0.85 - sharpness) * 2.2 : 0;
         candidates.push({
           frame,
           projections: colorProjections,
           recoveredTexture: true,
           qualityPreferred: false,
           score:
-            faceDot * 1.5 +
+            faceDot * 1.2 +
             facing * 0.4 +
             Math.min(2, 1 / distance) * 0.6 +
-            sharpness * 0.25 +
-            quality * 0.75 -
+            sharpness * 1.1 +
+            quality * 0.85 -
+            blurPenalty -
             texturePenalty * 0.8,
         });
       });
@@ -5262,10 +5387,9 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
   let wallStructure = meshWallStructureDiagnostics(surface);
   stages.wallStructure = wallStructure;
   stages.initialWallStructure = wallStructure;
-  const measuredSurfaceQuality =
-    options.completionMode === "surface"
-      ? measuredWallSectorQualityDiagnostics(surface)
-      : null;
+  surface = pruneBoundarySpikes(surface);
+  stages.removedBoundarySpikes = surface.removedBoundarySpikes || 0;
+  const measuredSurfaceQuality = measuredWallSectorQualityDiagnostics(surface);
   stages.measuredSurfaceQuality = measuredSurfaceQuality;
   stages.measuredGapWarning = measuredSurfaceGapWarning(
     measuredSurfaceQuality,
@@ -5277,7 +5401,6 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
   // views often see different portions of one wall. Keep those views unless
   // the measured result actually reports competing layers.
   if (
-    surfaceCompletion &&
     options.globalSurfaceConsensus !== false &&
     measuredSurfaceQuality?.duplicateLayerLikely
   ) {
@@ -5449,13 +5572,13 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
   surface = smoothPositions(
     surface,
     options.smoothingPasses ??
-      (options.completionMode === "surface" ? 2 : 3),
+      (options.completionMode === "surface" ? 3 : 4),
     volumeVoxelSize,
   );
   // Smooth first, then return supported wall vertices to their measured plane.
   // The previous order allowed the smoothing pass to reintroduce bowed trim
   // and wall lines immediately after they had been straightened.
-  if (surfaceCompletion && measuredSurfaceQuality?.assessed)
+  if (measuredSurfaceQuality?.assessed)
     surface = stabilizeMeasuredWallSectors(
       surface,
       measuredSurfaceQuality.walls,
