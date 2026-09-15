@@ -3101,7 +3101,7 @@ export function meshOutsideRectangularRoomModel(diagnostics) {
   );
 }
 
-export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
+export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
   const groups = new Map();
   let verticalArea = 0;
   for (let index = 0; index < mesh.indices.length; index += 3) {
@@ -3154,7 +3154,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
     verticalArea += area;
   }
   const rawPlanes = [...groups.values()]
-    .filter((group) => group.area >= Math.max(0.18, verticalArea * 0.08))
+    .filter((group) => group.area >= Math.max(0.10, verticalArea * 0.03))
     .sort((left, right) => right.area - left.area)
     .map((group) => {
       const length = Math.hypot(group.nx, group.ny, group.nz) || 1;
@@ -3175,8 +3175,8 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
         candidate.ny * existing.ny +
         candidate.nz * existing.nz;
       const offsetDiff = Math.abs(candidate.offset - existing.offset);
-      // Merge candidate duplicate sheets: similar normal and within 35cm
-      if (Math.abs(dot) >= 0.88 && offsetDiff <= 0.35) {
+      // Merge candidate duplicate sheets: similar normal and within 45cm
+      if (Math.abs(dot) >= 0.84 && offsetDiff <= 0.45) {
         duplicateOf = existing;
         break;
       }
@@ -3212,12 +3212,13 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
     }
   }
   if (!planes.length) return { ...mesh, stabilizedPlaneCount: 0 };
+
   const positions = new Float32Array(mesh.positions);
   const normals = computeNormals(mesh);
-  const distanceLimit = Math.min(0.22, Math.max(0.08, voxelSize * 4.5));
+  const distanceLimit = Math.min(0.38, Math.max(0.08, voxelSize * 6.5));
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const normalOffset = vertex * 3;
-    if (Math.abs(normals[normalOffset + 1]) > 0.38) continue;
+    if (Math.abs(normals[normalOffset + 1]) > 0.42) continue;
     let best = null;
     planes.forEach((plane) => {
       const alignment = Math.abs(
@@ -3225,7 +3226,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
         normals[normalOffset + 1] * plane.ny +
         normals[normalOffset + 2] * plane.nz,
       );
-      if (alignment < 0.82) return;
+      if (alignment < 0.72) return;
       const distance =
         positions[normalOffset] * plane.nx +
         positions[normalOffset + 1] * plane.ny +
@@ -3235,7 +3236,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 3) {
       if (!best || Math.abs(distance) < Math.abs(best.distance)) best = { plane, distance };
     });
     if (!best) continue;
-    const pullFactor = Math.abs(best.distance) > 0.05 ? 0.95 : 0.85;
+    const pullFactor = Math.abs(best.distance) > 0.04 ? 0.98 : 0.88;
     positions[normalOffset] -= best.plane.nx * best.distance * pullFactor;
     positions[normalOffset + 1] -= best.plane.ny * best.distance * pullFactor;
     positions[normalOffset + 2] -= best.plane.nz * best.distance * pullFactor;
@@ -5173,8 +5174,8 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
     // connected capture path. Otherwise preserve the ordinary connected set
     // and let TSDF/local-layer consensus reject inconsistent measurements.
     const preferredCoveragePreserved =
-      selectedRatio >= 0.8 &&
-      temporalSpanRatio >= 0.9 &&
+      selectedRatio >= 0.50 &&
+      temporalSpanRatio >= 0.70 &&
       longestRejectedRun <= maximumPreferredRejectedRun;
     const preferredOnly =
       !!options.preferCoherentSurfaceCore &&
@@ -5562,13 +5563,12 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
       }
     : null;
   const measuredPositions = surface.positions;
-  if (!surfaceCompletion)
-    surface = stabilizeDominantWalls(
-        surface,
-        volumeVoxelSize,
-        stages.rectangularRoomModelCompatible ? 4 : 3,
-      );
-  else surface = { ...surface, stabilizedPlaneCount: 0 };
+  surface = stabilizeDominantWalls(
+    surface,
+    volumeVoxelSize,
+    stages.rectangularRoomModelCompatible ? 4 : 6,
+  );
+  surface = pruneBoundarySpikes(surface);
   surface = smoothPositions(
     surface,
     options.smoothingPasses ??
