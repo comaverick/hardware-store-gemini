@@ -1967,8 +1967,10 @@ function extractSurfaceNet(volume, report, options = {}) {
             : closeRange
               ? Math.max(0.032, volume.voxelSize * 0.8)
               : Math.max(0.055, volume.voxelSize * 1.35);
+          const freeSpaceRatio = corner.measuredSupport >= 2 ? 2.5 : 2.0;
+          const freeSpaceMin = corner.measuredSupport >= 2 ? 5 : 4;
           const contradictedByFreeSpace =
-            corner.freeSpaceVotes >= Math.max(3, corner.weight * 1.25);
+            corner.freeSpaceVotes >= Math.max(freeSpaceMin, corner.weight * freeSpaceRatio);
           const repeatedVariance =
             corner.viewpoints >= (options.surfaceMode ? 3 : 2);
           // A derived hole may participate only as a small enclosed repair;
@@ -1991,8 +1993,11 @@ function extractSurfaceNet(volume, report, options = {}) {
         // boundary cell. Edge intersections below still require measured
         // endpoints, so this cannot span a genuinely unknown opening.
         if (confirmed < 4) {
-          const contradicted = known.some((corner) =>
-            corner.freeSpaceVotes >= Math.max(3, corner.weight * 1.25));
+          const contradicted = known.some((corner) => {
+            const freeSpaceRatio = corner.measuredSupport >= 2 ? 2.5 : 2.0;
+            const freeSpaceMin = corner.measuredSupport >= 2 ? 5 : 4;
+            return corner.freeSpaceVotes >= Math.max(freeSpaceMin, corner.weight * freeSpaceRatio);
+          });
           const highVariance = known.some((corner) => {
             const closeRange = corner.meanDepth < 0.9;
             const varianceLimit = options.surfaceMode
@@ -4401,6 +4406,130 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
           frameClippingPenalty * 0.8,
       });
     });
+    if (!candidates.length) {
+      // Tier 2 Fallback: For thin geometry, wire shelves, bottles, and fabric folds
+      // where strict depth agreement failed due to edge bleeding, depth noise, or
+      // dropout, project real camera texture if the triangle is within the frame's
+      // color viewport, faces the camera, and has no closer foreground occluder.
+      atlas.frames.forEach((frame) => {
+        const colorProjection = projectColorWorld(
+          frame,
+          center.x,
+          center.y,
+          center.z,
+        );
+        if (
+          !colorProjection ||
+          colorProjection.u < 0.02 ||
+          colorProjection.u > 0.98 ||
+          colorProjection.v < 0.02 ||
+          colorProjection.v > 0.98
+        ) {
+          return;
+        }
+        const colorProjections = triangle.map((vertex) =>
+          projectColorWorld(
+            frame,
+            projectionPositions[vertex * 3],
+            projectionPositions[vertex * 3 + 1],
+            projectionPositions[vertex * 3 + 2],
+          ),
+        );
+        if (
+          colorProjections.some(
+            (value) =>
+              !value ||
+              value.u < 0.01 ||
+              value.v < 0.01 ||
+              value.u > 0.99 ||
+              value.v > 0.99,
+          )
+        ) {
+          return;
+        }
+        const projectionStretch = textureProjectionStretch(
+          triangleProjectionPoints,
+          colorProjections,
+          frame.colorWidth,
+          frame.colorHeight,
+        );
+        if (!projectionStretch || projectionStretch.anisotropy > 5.2) {
+          return;
+        }
+        const textureTransform =
+          frame.viewTransformMatrix?.length === 16
+            ? frame.viewTransformMatrix
+            : frame.transformMatrix;
+        const dx = textureTransform[12] - center.x;
+        const dy = textureTransform[13] - center.y;
+        const dz = textureTransform[14] - center.z;
+        const distance = Math.hypot(dx, dy, dz) || 1;
+        const faceDot =
+          (faceNormal.x * dx + faceNormal.y * dy + faceNormal.z * dz) /
+          distance;
+        if (faceDot < 0.22) {
+          return;
+        }
+        // Occlusion check: Is there a foreground occluder between this camera and this triangle?
+        const depthProjection = projectWorld(
+          frame,
+          center.x,
+          center.y,
+          center.z,
+        );
+        if (
+          depthProjection &&
+          depthProjection.u >= 0.01 &&
+          depthProjection.u <= 0.99 &&
+          depthProjection.v >= 0.01 &&
+          depthProjection.v <= 0.99
+        ) {
+          const centerSample = sampleProjectiveDepth(
+            frame,
+            depthProjection.u,
+            depthProjection.v,
+          );
+          if (
+            centerSample > 0 &&
+            centerSample < depthProjection.depth - 0.12
+          ) {
+            return;
+          }
+        }
+        const texturePenalty = projectedTexturePenalty(frame, [
+          colorProjection,
+          ...colorProjections,
+        ]);
+        if (texturePenalty > 0.65) return;
+        const facing = Math.max(
+          0.1,
+          (normal.x * dx + normal.y * dy + normal.z * dz) / distance,
+        );
+        const sharpness = clamp(
+          frame.textureSharpness / atlas.referenceSharpness,
+          0.35,
+          1.65,
+        );
+        const quality = clamp(
+          frame.textureQuality / atlas.referenceQuality,
+          0.2,
+          1.8,
+        );
+        candidates.push({
+          frame,
+          projections: colorProjections,
+          recoveredTexture: true,
+          qualityPreferred: false,
+          score:
+            faceDot * 1.5 +
+            facing * 0.4 +
+            Math.min(2, 1 / distance) * 0.6 +
+            sharpness * 0.25 +
+            quality * 0.75 -
+            texturePenalty * 0.8,
+        });
+      });
+    }
     // Keep softer frames as a coverage fallback, but never let camera
     // distance or a patch-coherence bonus choose one over a clear valid view
     // of the same triangle. This is the distinction the v33 keep-all atlas

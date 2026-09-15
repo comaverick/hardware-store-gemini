@@ -41,6 +41,8 @@ export default function PartialScanReview({
               )} cm of horizontal camera-position spread. ScanSpace only shows
               the surfaces you captured; curved walls can indicate unreliable depth.
               For the next scan, move sideways while keeping each wall in view.
+              For best detail on curtains, shelves, and furniture, orbit or angle your phone
+              30°–45° across objects rather than facing only straight ahead.
             </p>
           </div>
         )}
