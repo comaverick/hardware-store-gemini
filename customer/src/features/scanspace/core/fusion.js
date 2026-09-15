@@ -1,7 +1,7 @@
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const MIN_ROOM_DEPTH_METERS = 0.45;
 const MIN_INDEPENDENT_VIEW_METERS = 0.04;
-const FALLBACK_COLOR = [108, 122, 116];
+const FALLBACK_COLOR = [225, 222, 218];
 const CUBE_CORNERS = [
   [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
   [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
@@ -1840,7 +1840,7 @@ function regularizeVolume(volume) {
       }
 }
 
-function propagateSurfaceColors(volume, passes = 2) {
+function propagateSurfaceColors(volume, passes = 5) {
   const [width, height, depth] = volume.dimensions;
   const directions = [];
   for (let z = -1; z <= 1; z++)
@@ -1874,7 +1874,7 @@ function propagateSurfaceColors(volume, passes = 2) {
             sum[2] += sourceColors[offset + 2];
             support++;
           });
-          if (support < 4) continue;
+          if (support < (pass < 2 ? 3 : 2)) continue;
           const offset = index * 3;
           volume.colors[offset] = sum[0] / support;
           volume.colors[offset + 1] = sum[1] / support;
@@ -4548,6 +4548,7 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       .slice(0, 4);
     const record = {
       triangle,
+      center,
       faceNormal,
       candidates: viableCandidates,
       selected: 0,
@@ -4716,11 +4717,14 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       record.selected = selected;
     });
 
-  // Tier 3 (Photographic Neighbor Infilling): For any triangle that still has 0 candidates
-  // (e.g. tight crevices, dark corners, thin wire edges, or shadows), propagate texture UVs
-  // from adjacent textured neighbors so that 100% of the mesh is mapped to real camera photos,
-  // completely eliminating muddy fallback vertex colors or blank tiles.
-  for (let pass = 0; pass < 4; pass++) {
+  // Tier 3 (Valid photographic texture from adjacent camera views):
+  // For triangles that missed Tier 1 and Tier 2 (e.g. slight depth noise or boundary clutter),
+  // candidate frames from adjacent textured neighbors can be used ONLY IF:
+  // 1) All 3 vertices project strictly inside the camera image bounds ([0.02, 0.98])
+  // 2) Triangle normal faces the camera (faceDot >= 0.18)
+  // 3) Anisotropy is within reasonable limits (<= 4.8)
+  // Under NO circumstances are out-of-bounds projections clamped to border pixels (which produces flat solid brown/gray blobs).
+  for (let pass = 0; pass < 3; pass++) {
     let untexturedRemaining = 0;
     records.forEach((record) => {
       if (record.candidates.length) return;
@@ -4729,24 +4733,52 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
         const neighborCandidate = neighborRecord.candidates[neighborRecord.selected];
         if (!neighborCandidate?.frame) continue;
         const frame = neighborCandidate.frame;
-        const colorProjections = record.triangle.map((vertex) => {
-          const proj = projectColorWorld(
+        const colorProjections = record.triangle.map((vertex) =>
+          projectColorWorld(
             frame,
             projectionPositions[vertex * 3],
             projectionPositions[vertex * 3 + 1],
             projectionPositions[vertex * 3 + 2],
-          );
-          return {
-            u: clamp(proj ? proj.u : 0.5, 0.005, 0.995),
-            v: clamp(proj ? proj.v : 0.5, 0.005, 0.995),
-          };
-        });
+          )
+        );
+        if (
+          colorProjections.some(
+            (proj) => !proj || proj.u < 0.02 || proj.u > 0.98 || proj.v < 0.02 || proj.v > 0.98
+          )
+        ) {
+          continue;
+        }
+        const stretch = textureProjectionStretch(
+          record.triangle.map((vertex) => [
+            projectionPositions[vertex * 3],
+            projectionPositions[vertex * 3 + 1],
+            projectionPositions[vertex * 3 + 2],
+          ]),
+          colorProjections,
+          frame.colorWidth,
+          frame.colorHeight,
+        );
+        if (!stretch || stretch.anisotropy > 4.8) continue;
+
+        const textureTransform =
+          frame.viewTransformMatrix?.length === 16
+            ? frame.viewTransformMatrix
+            : frame.transformMatrix;
+        const center = record.center;
+        const dx = textureTransform[12] - center.x;
+        const dy = textureTransform[13] - center.y;
+        const dz = textureTransform[14] - center.z;
+        const dist = Math.hypot(dx, dy, dz) || 1;
+        const faceDot =
+          (record.faceNormal.x * dx + record.faceNormal.y * dy + record.faceNormal.z * dz) / dist;
+        if (faceDot < 0.18) continue;
+
         record.candidates = [{
           frame,
           projections: colorProjections,
           recoveredTexture: true,
           qualityPreferred: false,
-          score: (neighborCandidate.score || 1) * 0.85,
+          score: (neighborCandidate.score || 1) * 0.82,
         }];
         record.selected = 0;
         break;
@@ -4754,34 +4786,6 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       if (!record.candidates.length) untexturedRemaining++;
     });
     if (!untexturedRemaining) break;
-  }
-
-  // Global fallback for any completely isolated orphan triangles without neighbors
-  if (atlas.frames.length) {
-    const fallbackFrame = atlas.frames[0];
-    records.forEach((record) => {
-      if (record.candidates.length) return;
-      const colorProjections = record.triangle.map((vertex) => {
-        const proj = projectColorWorld(
-          fallbackFrame,
-          projectionPositions[vertex * 3],
-          projectionPositions[vertex * 3 + 1],
-          projectionPositions[vertex * 3 + 2],
-        );
-        return {
-          u: clamp(proj ? proj.u : 0.5, 0.005, 0.995),
-          v: clamp(proj ? proj.v : 0.5, 0.005, 0.995),
-        };
-      });
-      record.candidates = [{
-        frame: fallbackFrame,
-        projections: colorProjections,
-        recoveredTexture: true,
-        qualityPreferred: false,
-        score: 0.1,
-      }];
-      record.selected = 0;
-    });
   }
 
   const positions = [];
@@ -4792,12 +4796,15 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
   let texturedTriangles = 0;
   let recoveredTextureTriangles = 0;
   let softTextureFallbackTriangles = 0;
-  // Where a texture-valid triangle meets a color-only triangle, carry its
-  // measured corner color into the fallback. Keep the best observation, never
-  // average different camera images or propagate across gaps/folds.
+
+  // Harmonically inpaint fallback colors:
+  // 1) Boundary vertices meeting textured triangles receive real measured camera pixel colors.
+  // 2) Untextured vertices deep in mesh cavities diffuse the boundary colors smoothly across the mesh graph,
+  // completely eliminating dark/slate-gray patches while preserving any explicit measured vertex colors.
   const fallbackColors = new Uint8Array(mesh.colors);
   const boundaryScores = new Float32Array(mesh.positions.length / 3).fill(-Infinity);
   const fallbackVertices = new Uint8Array(boundaryScores.length);
+  const isBoundaryVertex = new Uint8Array(boundaryScores.length);
   records.forEach((record) => {
     if (!record.candidates.length)
       record.triangle.forEach((vertex) => { fallbackVertices[vertex] = 1; });
@@ -4812,9 +4819,75 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       const color = calibratedTexturePixel(best.frame, best.projections[corner]);
       if (!color) return;
       boundaryScores[vertex] = best.score;
+      isBoundaryVertex[vertex] = 1;
       fallbackColors.set(color.map(linearByte), vertex * 3);
     });
   });
+
+  // Multi-pass harmonic diffusion across the mesh graph for unmeasured / fallback vertices:
+  const vertexCount = mesh.positions.length / 3;
+  const vertexAdjacency = Array.from({ length: vertexCount }, () => []);
+  for (let i = 0; i < mesh.indices.length; i += 3) {
+    const v0 = mesh.indices[i];
+    const v1 = mesh.indices[i + 1];
+    const v2 = mesh.indices[i + 2];
+    vertexAdjacency[v0].push(v1, v2);
+    vertexAdjacency[v1].push(v0, v2);
+    vertexAdjacency[v2].push(v0, v1);
+  }
+
+  // Identify untextured vertices that need diffusion (unmeasured, default gray, or dark fallback):
+  const needsDiffusion = new Uint8Array(vertexCount);
+  for (let v = 0; v < vertexCount; v++) {
+    if (fallbackVertices[v] && !isBoundaryVertex[v]) {
+      const r = fallbackColors[v * 3];
+      const g = fallbackColors[v * 3 + 1];
+      const b = fallbackColors[v * 3 + 2];
+      // If vertex has the old default slate-gray [108, 122, 116] or linearByte(108,122,116) ~ [38, 50, 45],
+      // or near-black [0, 0, 0], diffuse real color from neighbors!
+      const isDefaultGray = (Math.abs(r - 108) < 8 && Math.abs(g - 122) < 8 && Math.abs(b - 116) < 8) ||
+                            (Math.abs(r - 38) < 8 && Math.abs(g - 50) < 8 && Math.abs(b - 45) < 8) ||
+                            (r < 15 && g < 15 && b < 15);
+      if (isDefaultGray) {
+        needsDiffusion[v] = 1;
+      }
+    }
+  }
+
+  // Diffuse colors smoothly over 8 passes
+  const diffusedColors = new Float32Array(fallbackColors);
+  for (let pass = 0; pass < 8; pass++) {
+    let diffusionsRemaining = 0;
+    for (let v = 0; v < vertexCount; v++) {
+      if (!needsDiffusion[v]) continue;
+      const neighbors = vertexAdjacency[v];
+      let rSum = 0, gSum = 0, bSum = 0, weightSum = 0;
+      for (let n = 0; n < neighbors.length; n++) {
+        const neighbor = neighbors[n];
+        if (needsDiffusion[neighbor] && pass < 4) continue;
+        const weight = isBoundaryVertex[neighbor] ? 2.5 : 1.0;
+        rSum += diffusedColors[neighbor * 3] * weight;
+        gSum += diffusedColors[neighbor * 3 + 1] * weight;
+        bSum += diffusedColors[neighbor * 3 + 2] * weight;
+        weightSum += weight;
+      }
+      if (weightSum > 0) {
+        diffusedColors[v * 3] = rSum / weightSum;
+        diffusedColors[v * 3 + 1] = gSum / weightSum;
+        diffusedColors[v * 3 + 2] = bSum / weightSum;
+      } else {
+        diffusionsRemaining++;
+      }
+    }
+    if (!diffusionsRemaining) break;
+  }
+  for (let v = 0; v < vertexCount; v++) {
+    if (needsDiffusion[v]) {
+      fallbackColors[v * 3] = clamp(Math.round(diffusedColors[v * 3]), 0, 255);
+      fallbackColors[v * 3 + 1] = clamp(Math.round(diffusedColors[v * 3 + 1]), 0, 255);
+      fallbackColors[v * 3 + 2] = clamp(Math.round(diffusedColors[v * 3 + 2]), 0, 255);
+    }
+  }
   records.forEach((record) => {
     const triangle = record.triangle;
     const best = record.candidates[record.selected] || null;
@@ -5366,11 +5439,11 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
       }
     : null;
   const measuredPositions = surface.positions;
-  if (!surfaceCompletion && stages.rectangularRoomModelCompatible)
+  if (!surfaceCompletion)
     surface = stabilizeDominantWalls(
         surface,
         volumeVoxelSize,
-        3,
+        stages.rectangularRoomModelCompatible ? 4 : 3,
       );
   else surface = { ...surface, stabilizedPlaneCount: 0 };
   surface = smoothPositions(
@@ -5388,12 +5461,11 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
       measuredSurfaceQuality.walls,
       volumeVoxelSize,
     );
-  if (surfaceCompletion)
-    surface = stabilizeMeasuredHorizontalSurfaces(
-      surface,
-      volumeVoxelSize,
-      5,
-    );
+  surface = stabilizeMeasuredHorizontalSurfaces(
+    surface,
+    volumeVoxelSize,
+    5,
+  );
   const constrained = constrainSurfaceDeformation(
     { ...surface, positions: measuredPositions },
     surface.positions,

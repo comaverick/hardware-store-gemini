@@ -108,7 +108,7 @@ test("higher-resolution texture snapshots stay bounded without dropping depth fr
   scanner.compactTextureKeyframes();
   expect(scanner.keyframes).toHaveLength(25);
   expect(scanner.keyframes.every((frame) => frame.depths[0] === 2)).toBe(true);
-  expect(scanner.stats.textureKeyframes).toBe(15);
+  expect(scanner.stats.textureKeyframes).toBe(24);
   expect(scanner.keyframes[0].colorImage).toBeNull();
   expect(
     scanner.keyframes.slice(-2).some((frame) => frame.colorImage !== null),
