@@ -2,14 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RoomScanner } from "../xr/RoomScanner";
 import { buildScanCloud } from "../core/scanCloud";
 import { snapshotDepthCapture, downloadDepthCapture } from "../core/captureDebug";
-import {
-  surfaceScanReadiness,
-  MIN_CAMERA_BASELINE_METERS,
-  MIN_DIRECTION_COVERAGE,
-  MIN_FUSION_KEYFRAMES,
-  MIN_STABLE_POINTS,
-  FLOOR_OUTLIER_TOLERANCE_METERS,
-} from "../core/readiness";
+import { FLOOR_OUTLIER_TOLERANCE_METERS } from "../core/readiness";
 
 function observationPoints(observations) {
   if (!observations?.count || !observations.positions?.length) return null;
@@ -161,7 +154,6 @@ export default function ScannerPanel({
     [partial, setPartial] = useState(null),
     [fusion, setFusion] = useState(null),
     [error, setError] = useState("");
-  const surfaceReadiness = surfaceScanReadiness(stats);
   // Finishing a partial surface only needs enough saved data to form a mesh.
   // The fuller readiness score remains useful guidance, but must not trap the
   // user in capture when they deliberately scanned only one wall.

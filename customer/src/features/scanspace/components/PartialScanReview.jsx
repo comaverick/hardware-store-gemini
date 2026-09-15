@@ -3,11 +3,6 @@ import { CheckCircle, Info, WarningCircle } from "@phosphor-icons/react";
 import PartialScanScene from "./PartialScanScene";
 import { downloadDepthCapture } from "../core/captureDebug";
 import { downloadScan } from "../core/partialScanFile";
-import {
-  MIN_CAMERA_BASELINE_METERS,
-  MIN_DIRECTION_COVERAGE,
-} from "../core/readiness";
-
 export default function PartialScanReview({
   scan,
   onCompleteManually,
@@ -15,7 +10,6 @@ export default function PartialScanReview({
   onDone,
 }) {
   const [exportError, setExportError] = useState("");
-  const quality = scan.captureQuality;
   return (
     <section className="ss-partial-review">
       <header>
