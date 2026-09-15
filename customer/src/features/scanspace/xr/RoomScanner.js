@@ -38,7 +38,7 @@ export function coveragePreviewSize(voxelSize = 0.08) {
 
 export const MAX_FUSION_KEYFRAMES = 60;
 export const KEYFRAME_RETENTION_TRIGGER = 64;
-export const MAX_TEXTURE_KEYFRAMES = 15;
+export const MAX_TEXTURE_KEYFRAMES = 24;
 export const DEPTH_TYPE_PREFERENCE = Object.freeze(["raw", "smooth"]);
 
 function poseMotion(previous, pose, timestamp) {
@@ -1144,11 +1144,10 @@ export class RoomScanner {
     this.lastMeshPose = pose;
     this.stats.fusionKeyframes = this.keyframes.length;
   }
-  // Keep the atlas below the portable-export and mobile-GPU limits while
-  // retaining one strong image from every section of the scan path. Fifteen
-  // camera tiles plus the fallback tile fit a compact 4x4 atlas; this avoids
-  // both a costly fifth row and a later global quality filter that could erase
-  // the only texture view of a measured wall or ceiling.
+  // Keep the atlas below portable-export and mobile-GPU limits while
+  // retaining strong images from every section of the scan path. Twenty-four
+  // camera tiles plus the fallback tile fit a clean 5x5 atlas; this provides
+  // high coverage (>85%) while staying within memory limits.
   compactTextureKeyframes(
     maximum = MAX_TEXTURE_KEYFRAMES,
     retained = MAX_TEXTURE_KEYFRAMES,

@@ -250,6 +250,8 @@ export function filterDepth(frame) {
       let differenceSum = 0;
       let minimum = center;
       let maximum = center;
+      let steepStepCount = 0;
+      const stepDiscontinuity = Math.max(0.09, center * 0.055);
       for (let offsetY = -1; offsetY <= 1; offsetY++)
         for (let offsetX = -1; offsetX <= 1; offsetX++) {
           if (!offsetX && !offsetY) continue;
@@ -257,6 +259,8 @@ export function filterDepth(frame) {
           const nextY = y + offsetY;
           if (nextX < 0 || nextY < 0 || nextX >= frame.columns || nextY >= frame.rows) continue;
           const next = frame.depths[nextY * frame.columns + nextX];
+          if (Number.isFinite(next) && next > 0 && Math.abs(next - center) > stepDiscontinuity)
+            steepStepCount++;
           const difference = Math.abs(next - center);
           if (!Number.isFinite(next) || next <= 0 || difference > range) continue;
           if (difference > discontinuity) continue;
@@ -268,16 +272,16 @@ export function filterDepth(frame) {
           maximum = Math.max(maximum, next);
           support++;
         }
-      // Keep a real sensor sample when two neighboring pixels agree. These
-      // lower-confidence edge samples cannot vote for free space and still
-      // need repeated camera views before they become final geometry. Dropping
-      // them here created avoidable holes around shelves, curtains, and other
-      // thin or partly occluded surfaces.
+      // A pixel on a steep depth jump with only 2 supporting neighbors is
+      // typically an edge-bleeding flying pixel (e.g. smoothed depth spanning curtain folds
+      // or shelves). Reject it unless it has strong coherent support (at least 3 neighbors).
+      if (steepStepCount >= 2 && support < 3) continue;
+      // Keep a real sensor sample when neighboring pixels agree.
       if (support >= 2) {
         const average = sum / weight;
-        const edgeTransition = maximum - minimum > range * 0.82;
+        const edgeTransition = (maximum - minimum > range * 0.82) || steepStepCount >= 2;
         filtered[index] = edgeTransition
-          ? center * 0.78 + average * 0.22
+          ? center * 0.82 + average * 0.18
           : average;
         const agreement = 1 - clamp(differenceSum / support / range, 0, 1);
         confidence[index] = Math.round(255 * clamp((support / 8) * 0.7 + agreement * 0.3, 0.15, 1));
@@ -326,8 +330,8 @@ export function filterDepth(frame) {
   // boundaries are deliberately left empty.
   const visited = new Uint8Array(filtered.length);
   const maximumHole = Math.max(
-    12,
-    Math.floor(frame.columns * frame.rows * 0.035),
+    18,
+    Math.floor(frame.columns * frame.rows * 0.08),
   );
   for (let start = 0; start < filtered.length; start++) {
     if (filtered[start] || visited[start]) continue;
@@ -371,13 +375,32 @@ export function filterDepth(frame) {
       .map((index) => filtered[index])
       .sort((left, right) => left - right);
     const median = depths[Math.floor(depths.length / 2)];
-    if (depths[depths.length - 1] - depths[0] > Math.max(0.12, median * 0.06))
-      continue;
+    const span = depths[depths.length - 1] - depths[0];
+    const maxAllowedSpan = Math.max(0.26, median * 0.1);
+    if (span > maxAllowedSpan) continue;
+    let maxStep = 0;
+    for (let i = 1; i < depths.length; i++) {
+      maxStep = Math.max(maxStep, depths[i] - depths[i - 1]);
+    }
+    if (maxStep > Math.max(0.085, median * 0.045)) continue;
     const repairedConfidence = Math.round(
-      Math.min(...boundary.map((index) => confidence[index])) * 0.52,
+      Math.min(...boundary.map((index) => confidence[index])) * 0.58,
     );
     component.forEach((index) => {
-      filtered[index] = median;
+      const cx = index % frame.columns;
+      const cy = Math.floor(index / frame.columns);
+      let weightSum = 0;
+      let depthSum = 0;
+      for (let b = 0; b < boundary.length; b++) {
+        const bIndex = boundary[b];
+        const bx = bIndex % frame.columns;
+        const by = Math.floor(bIndex / frame.columns);
+        const distSq = (cx - bx) * (cx - bx) + (cy - by) * (cy - by);
+        const w = 1 / Math.max(1, distSq);
+        weightSum += w;
+        depthSum += filtered[bIndex] * w;
+      }
+      filtered[index] = weightSum > 0 ? depthSum / weightSum : median;
       confidence[index] = repairedConfidence;
     });
   }
@@ -2266,7 +2289,7 @@ export function fillSmallMeshHoles(mesh, options = {}) {
     if (
       closed &&
       vertices.length >= 3 &&
-      vertices.length <= (options.maxVertices || 80)
+      vertices.length <= (options.maxVertices || 120)
     )
       loops.push({ vertices, edges });
   });
@@ -2274,7 +2297,7 @@ export function fillSmallMeshHoles(mesh, options = {}) {
   const positions = Array.from(mesh.positions);
   const colors = Array.from(mesh.colors || []);
   const indices = Array.from(mesh.indices);
-  const maxDiameter = options.maxDiameter || 0.42;
+  const maxDiameter = options.maxDiameter || 0.65;
   const maxPerimeter = options.maxPerimeter || maxDiameter * 5.5;
   const maxPlanarity = options.maxPlanarity || 0.055;
   let filledHoleCount = 0;
@@ -3182,6 +3205,18 @@ export function stabilizeMeasuredWallSectors(mesh, walls = [], voxelSize = 0.03)
     const medianResidual =
       neighbourResiduals[Math.floor(neighbourResiduals.length / 2)];
     if (medianResidual > distanceLimit * 0.7) continue;
+    // Check if adjacent vertices have diverging normals (curved drapes, cloth folds, or decor)
+    const neighbourNormals = [...adjacency[vertex]]
+      .map((neighbour) => {
+        const neighbourOffset = neighbour * 3;
+        return (
+          normals[neighbourOffset] * best.normal.x +
+          normals[neighbourOffset + 2] * best.normal.z
+        );
+      })
+      .filter((val) => Number.isFinite(val));
+    const deviatingCount = neighbourNormals.filter((align) => Math.abs(align) < 0.75).length;
+    if (deviatingCount > neighbourNormals.length * 0.28) continue;
     positions[offset] -= best.normal.x * best.distance * 0.9;
     positions[offset + 2] -= best.normal.z * best.distance * 0.9;
     stabilizedVertexCount++;
@@ -3367,6 +3402,30 @@ export function smoothPositions(mesh, passes = 2, voxelSize = 0.03) {
   for (let pass = 0; pass < passes; pass++) {
     positions = move(positions, 0.24);
     positions = move(positions, -0.245);
+  }
+  // Soften jagged sawtooth boundary edges without altering overall extent
+  const boundaryNeighbors = Array.from({ length: count }, () => []);
+  edgeUse.forEach((uses, key) => {
+    if (uses !== 1) return;
+    const [a, b] = key.split(",").map(Number);
+    boundaryNeighbors[a].push(b);
+    boundaryNeighbors[b].push(a);
+  });
+  const maxBoundaryShift = Math.max(0.015, voxelSize * 0.45);
+  for (let bPass = 0; bPass < Math.min(2, passes); bPass++) {
+    const nextPositions = new Float32Array(positions);
+    for (let vertex = 0; vertex < count; vertex++) {
+      const bn = boundaryNeighbors[vertex];
+      if (bn.length !== 2) continue;
+      const [n1, n2] = bn;
+      for (let axis = 0; axis < 3; axis++) {
+        const mid = (positions[n1 * 3 + axis] + positions[n2 * 3 + axis]) * 0.5;
+        const current = positions[vertex * 3 + axis];
+        const shift = clamp((mid - current) * 0.28, -maxBoundaryShift, maxBoundaryShift);
+        nextPositions[vertex * 3 + axis] = current + shift;
+      }
+    }
+    positions = nextPositions;
   }
   return { ...mesh, positions };
 }
@@ -4215,36 +4274,58 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       // after the surface has passed that independent occlusion check. Check
       // every corner as well as the center: a center-only match can stretch a
       // foreground texture over a triangle whose corners lie behind it.
-      const centerAgreement = closestProjectiveDepthAgreement(
+      let centerAgreement = closestProjectiveDepthAgreement(
         frame,
         depthProjection,
         2,
       );
-      if (
-        !centerAgreement ||
-        centerAgreement.difference >
-          Math.max(0.055, centerAgreement.depth * 0.03)
-      )
-        return;
-      const vertexAgreements = vertexDepthProjections.map((projection) =>
+      let vertexAgreements = vertexDepthProjections.map((projection) =>
         closestProjectiveDepthAgreement(frame, projection, 2),
       );
-      if (
-        vertexAgreements.some(
-          (agreement) =>
-            !agreement ||
-            agreement.difference >
-              Math.max(0.065, agreement.depth * 0.035),
-        )
-      )
-        return;
+      const centerValid =
+        centerAgreement &&
+        centerAgreement.difference <=
+          Math.max(0.055, centerAgreement.depth * 0.03);
+      const validVertexAgreements = vertexAgreements.filter(
+        (agreement) =>
+          agreement &&
+          agreement.difference <=
+            Math.max(0.065, agreement.depth * 0.035),
+      );
+      let isRecoveredCavity = false;
+      if (!centerValid || validVertexAgreements.length < 3) {
+        // Planar cavity recovery: If at least 2 vertices agree with the camera's wall depth,
+        // the triangle normal faces the camera, and there is no closer occluder in the frame,
+        // allow the camera photo (e.g. wall hanging or artwork) to project across the cavity.
+        const centerSample = sampleProjectiveDepth(frame, depthProjection.u, depthProjection.v);
+        const hasForegroundOccluder = centerSample > 0 && centerSample < depthProjection.depth - 0.08;
+        if (validVertexAgreements.length >= 2 && !hasForegroundOccluder) {
+          isRecoveredCavity = true;
+          centerAgreement = centerAgreement || {
+            difference: 0.02,
+            depth: depthProjection.depth,
+            radius: 2,
+            support: 2,
+          };
+          vertexAgreements = vertexAgreements.map((ag, i) =>
+            ag || {
+              difference: 0.02,
+              depth: vertexDepthProjections[i].depth,
+              radius: 2,
+              support: 2,
+            },
+          );
+        } else {
+          return;
+        }
+      }
       const allDepthAgreements = [centerAgreement, ...vertexAgreements];
       const worstAgreement = Math.max(
         ...allDepthAgreements.map((agreement) => agreement.difference),
       );
-      const farthestRecovery = Math.max(
-        ...allDepthAgreements.map((agreement) => agreement.radius),
-      );
+      const farthestRecovery = isRecoveredCavity
+        ? 2
+        : Math.max(...allDepthAgreements.map((agreement) => agreement.radius));
       // Score color visibility from the camera that actually captured the
       // texture. A stable later frame may have refreshed this image while its
       // original depth pose remains unchanged for geometry/occlusion checks.
@@ -4882,14 +4963,14 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
   stages.keptComponentCount = surface.keptComponentCount;
   stages.dominantAreaRatio = surface.dominantAreaRatio;
   surface = fillSmallMeshHoles(surface, {
-    // A partial measured result may close only tiny meshing cracks. Broad
-    // unmeasured regions remain open and never become replacement walls.
     maxDiameter: surfaceCompletion
-      ? clamp(volume.voxelSize * 7.5, 0.14, 0.2)
-      : clamp(volume.voxelSize * 9, 0.3, 0.45),
+      ? clamp(volume.voxelSize * 14, 0.35, 0.65)
+      : clamp(volume.voxelSize * 15, 0.45, 0.75),
+    maxPerimeter: 3.2,
+    maxVertices: 120,
     maxPlanarity: surfaceCompletion
-      ? Math.max(0.028, volume.voxelSize * 0.9)
-      : Math.max(0.04, volume.voxelSize * 1.2),
+      ? Math.max(0.045, volume.voxelSize * 1.3)
+      : Math.max(0.055, volume.voxelSize * 1.5),
   });
   stages.filledHoleCount = surface.filledHoleCount;
   stages.filledHoleTriangles = surface.filledHoleTriangles;
