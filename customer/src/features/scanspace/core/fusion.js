@@ -4715,6 +4715,75 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       });
       record.selected = selected;
     });
+
+  // Tier 3 (Photographic Neighbor Infilling): For any triangle that still has 0 candidates
+  // (e.g. tight crevices, dark corners, thin wire edges, or shadows), propagate texture UVs
+  // from adjacent textured neighbors so that 100% of the mesh is mapped to real camera photos,
+  // completely eliminating muddy fallback vertex colors or blank tiles.
+  for (let pass = 0; pass < 4; pass++) {
+    let untexturedRemaining = 0;
+    records.forEach((record) => {
+      if (record.candidates.length) return;
+      for (let n = 0; n < record.neighbors.length; n++) {
+        const neighborRecord = records[record.neighbors[n]];
+        const neighborCandidate = neighborRecord.candidates[neighborRecord.selected];
+        if (!neighborCandidate?.frame) continue;
+        const frame = neighborCandidate.frame;
+        const colorProjections = record.triangle.map((vertex) => {
+          const proj = projectColorWorld(
+            frame,
+            projectionPositions[vertex * 3],
+            projectionPositions[vertex * 3 + 1],
+            projectionPositions[vertex * 3 + 2],
+          );
+          return {
+            u: clamp(proj ? proj.u : 0.5, 0.005, 0.995),
+            v: clamp(proj ? proj.v : 0.5, 0.005, 0.995),
+          };
+        });
+        record.candidates = [{
+          frame,
+          projections: colorProjections,
+          recoveredTexture: true,
+          qualityPreferred: false,
+          score: (neighborCandidate.score || 1) * 0.85,
+        }];
+        record.selected = 0;
+        break;
+      }
+      if (!record.candidates.length) untexturedRemaining++;
+    });
+    if (!untexturedRemaining) break;
+  }
+
+  // Global fallback for any completely isolated orphan triangles without neighbors
+  if (atlas.frames.length) {
+    const fallbackFrame = atlas.frames[0];
+    records.forEach((record) => {
+      if (record.candidates.length) return;
+      const colorProjections = record.triangle.map((vertex) => {
+        const proj = projectColorWorld(
+          fallbackFrame,
+          projectionPositions[vertex * 3],
+          projectionPositions[vertex * 3 + 1],
+          projectionPositions[vertex * 3 + 2],
+        );
+        return {
+          u: clamp(proj ? proj.u : 0.5, 0.005, 0.995),
+          v: clamp(proj ? proj.v : 0.5, 0.005, 0.995),
+        };
+      });
+      record.candidates = [{
+        frame: fallbackFrame,
+        projections: colorProjections,
+        recoveredTexture: true,
+        qualityPreferred: false,
+        score: 0.1,
+      }];
+      record.selected = 0;
+    });
+  }
+
   const positions = [];
   const normals = [];
   const colors = [];

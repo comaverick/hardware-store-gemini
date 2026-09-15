@@ -88,124 +88,53 @@ function CoverageCompass({ sectors = [], heading = 0 }) {
 
 function captureGuidance(stats, busy = false) {
   if (busy)
-    return "Capture is safely paused while the accepted depth frames are reconstructed.";
+    return "Building your 3D scan...";
   if (!stats.tracking)
-    return "Tracking is unstable. Point back at a confirmed area and hold still.";
+    return "Tracking paused. Point back at the scanned area to resume.";
   if (stats.depthState === "unavailable")
-    return "This session has no CPU depth sensor. End the scan and use a supported Android browser.";
+    return "This session has no depth sensor. Use a supported WebXR device.";
   if (stats.depthState === "error")
-    return "Depth reading was interrupted. Hold still over a matte surface while ScanSpace retries.";
+    return "Depth sensor interrupted. Reconnecting...";
   if (!stats.depthCurrent)
-    return stats.depthState === "stalled"
-      ? "Depth frames stopped. Hold still over a textured, well-lit surface and let tracking recover."
-      : "Waiting for depth. Aim at a matte, well-lit surface and hold still for a moment.";
-  if (stats.movingTooFast)
-    return "Move more slowly. Fast depth frames are being skipped to prevent warped surfaces.";
-  if (stats.colorActive && stats.colorFrameReliable === false)
-    return "Hold still briefly. Depth is being kept, but blurred camera colors are being skipped.";
-  if (
-    (stats.rejectedDepthFrames || 0) >= 6 &&
-    (stats.rejectedDepthFrames || 0) /
-      Math.max(1, (stats.acceptedDepthFrames || 0) + (stats.rejectedDepthFrames || 0)) >
-      0.12
-  )
-    return "Several frames were too fast or unreliable. Slow down and repeat this area for better overlap.";
-  if (stats.colorActive && (stats.colorClippedRatio || 0) > 0.45)
-    return "Color is clipped here. Tilt away from bright windows and hold still for a clearer texture.";
-  if (stats.frameQuality === "sparse-depth")
-    return "Depth is sparse here. Aim at a matte, well-lit surface and revisit shiny or dark areas from another angle.";
-  if (stats.frameQuality === "pose-inconsistent")
-    return "Tracking drift was detected. Return to the last confirmed area, hold still, then continue slowly.";
-  if (stats.nearDepthWarning)
-    return "Something is reading very close. Step back, keep fingers clear, and rescan that area slowly.";
-  if (!Number.isFinite(stats.floorY))
-    return "Aim at the floor until floor detection says Ready.";
-  if ((stats.fusionKeyframes || 0) < 2)
-    return "Move slowly sideways while keeping the same surface centered.";
-  if ((stats.fusionKeyframes || 0) < MIN_FUSION_KEYFRAMES)
-    return "Good start. Continue one slow sideways pass for stronger overlap.";
-  if ((stats.cameraBaseline || 0) < MIN_CAMERA_BASELINE_METERS)
-    return "Do not only pivot in place. Move sideways at least 40 cm while keeping the same wall centered.";
-  if ((stats.coverage || 0) < MIN_DIRECTION_COVERAGE)
-    return "Turn through the unscanned directions and keep each wall in view.";
-  if ((stats.stablePointCount || 0) < MIN_STABLE_POINTS)
-    return "Keep scanning the walls from overlapping angles to fill the remaining gaps.";
-  return "Surface overlap is building. Cover dark or reflective areas from another angle.";
+    return "Starting depth sensor...";
+  if ((stats.fusionKeyframes || 0) >= 2)
+    return "Surfaces captured. You can finish your scan whenever you are ready.";
+  return "Scanning surfaces... Move your phone across the area you want to capture.";
 }
 
 function captureTargetState(stats, busy = false) {
   if (busy)
     return {
       tone: "busy",
-      label: "Building result",
-      hint: "Capture is safely paused",
+      label: "Building scan",
+      hint: "Reconstructing 3D surfaces",
     };
   if (stats.paused)
     return stats.originChanged
       ? { tone: "busy", label: "Tracking reset", hint: "Start a new scan" }
-      : { tone: "busy", label: "Capture paused", hint: "Resume to save more views" };
+      : { tone: "busy", label: "Capture paused", hint: "Resume to continue" };
   if (!stats.tracking)
     return {
       tone: "warning",
-      label: "Tracking lost",
-      hint: "Aim at a confirmed area",
-    };
-  if (stats.movingTooFast)
-    return {
-      tone: "warning",
-      label: "Slow down",
-      hint: "This frame was not saved",
+      label: "Tracking paused",
+      hint: "Point at a scanned area",
     };
   if (!stats.depthCurrent)
     return {
-      tone: "warning",
-      label:
-        stats.depthState === "error"
-          ? "Depth read interrupted"
-          : stats.depthState === "stalled"
-            ? "Depth interrupted"
-            : "Waiting for depth",
-      hint:
-        stats.depthState === "error"
-          ? "Hold still while ScanSpace retries"
-          : stats.depthState === "stalled"
-            ? "Hold still to recover tracking"
-            : "Aim at a matte surface",
-    };
-  if (stats.frameQuality === "pose-inconsistent")
-    return {
-      tone: "warning",
-      label: "Tracking drift detected",
-      hint: "Return to the last confirmed area",
-    };
-  if (stats.frameQuality === "sparse-depth" || stats.nearDepthWarning)
-    return {
-      tone: "warning",
-      label: "Weak depth here",
-      hint: "Step back or change angle",
-    };
-  if ((stats.cameraBaseline || 0) < MIN_CAMERA_BASELINE_METERS)
-    return {
       tone: "pending",
-      label: "Move slowly sideways",
-      hint: "Keep this surface in view as you move",
+      label: "Initializing",
+      hint: "Preparing depth stream",
     };
-  if ((stats.currentConfirmedRatio || 0) >= 0.85)
+  if ((stats.fusionKeyframes || 0) >= 2)
     return {
       tone: "complete",
-      label: "Area confirmed",
-      hint: "Move to any untinted gap",
-    };
-  if ((stats.currentConfirmedRatio || 0) >= 0.2)
-    return {
-      tone: "active",
-      label: "Coverage filling",
-      hint: "Tint the remaining clear areas",
+      label: "Ready to finish",
+      hint: "Tap Finish scan whenever done",
     };
   return {
-    tone: "pending",
-    label: "Add another viewpoint",
-    hint: "Move slowly sideways, keeping this area in view",
+    tone: "active",
+    label: "Scanning surfaces",
+    hint: "Move phone across the scene",
   };
 }
 
@@ -574,25 +503,13 @@ export default function ScannerPanel({
               <p className="ss-scan-hint">
                 {partial
                   ? "Your captured views are still available; nothing was discarded."
-                  : captureGuidance(stats, busy)}{" "}
-                Mint coverage marks areas confirmed from multiple saved views.
-                Keep moving until the visible surface is evenly tinted; clear
-                gaps still need another angle.
+                  : captureGuidance(stats, busy)}
               </p>
-              {!busy && !partial && !hasReconstructableCapture && (
+              {!busy && !partial && hasReconstructableCapture && (
                 <p className="ss-scan-hint">
-                  Capture at least two nearby depth views before finishing.
+                  Ready to finish. Tap &ldquo;Finish scan&rdquo; below whenever you are done.
                 </p>
               )}
-              {!busy &&
-                !partial &&
-                hasReconstructableCapture &&
-                !surfaceReadiness.ready && (
-                  <p className="ss-scan-hint">
-                    You can finish this scan now. Additional slow, overlapping
-                    views may improve detail, but they are optional.
-                  </p>
-                )}
               {(stats.cloudCompactions > 0 || stats.fusionKeyframeCompactions > 0) && (
                 <p className="ss-scan-hint">
                   Capture density was optimized while preserving your scan coverage.

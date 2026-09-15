@@ -27,25 +27,7 @@ export default function PartialScanReview({
           generated walls.
         </p>
       </header>
-      {quality &&
-        (quality.coverage < MIN_DIRECTION_COVERAGE ||
-          quality.cameraBaseline < MIN_CAMERA_BASELINE_METERS) && (
-          <div className="ss-notice ss-notice--guidance">
-            <div className="ss-notice-title">
-              <Info size={17} weight="fill" aria-hidden="true" />
-              <strong>Capture coverage</strong>
-            </div>
-            <p>
-              This scan covers {quality.coverage}% of the heading sweep with {Math.round(
-                quality.cameraBaseline * 100,
-              )} cm of horizontal camera-position spread. ScanSpace only shows
-              the surfaces you captured; curved walls can indicate unreliable depth.
-              For the next scan, move sideways while keeping each wall in view.
-              For best detail on curtains, shelves, and furniture, orbit or angle your phone
-              30°–45° across objects rather than facing only straight ahead.
-            </p>
-          </div>
-        )}
+
       {scan.measuredReviewWarning ? (
         <div className="ss-notice ss-notice--warning" role="status">
           <div className="ss-notice-title">
