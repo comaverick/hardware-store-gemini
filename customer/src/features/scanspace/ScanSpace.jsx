@@ -142,7 +142,28 @@ export default function ScanSpace() {
       }
       const contents = await file.text();
       const hasRaw = hasRawCapture(contents) || isRawDiagnostics;
-      if (hasRaw) {
+      if (scanFile && !isRawDiagnostics) {
+        const parsed = parseScanFile(contents);
+        if (parsed.mesh) {
+          setSurfaceScan(parsed);
+          setStage("surface");
+          setError("");
+        } else if (hasRaw) {
+          setReconstructing({ stage: "Preparing keyframes…", progress: 2 });
+          const rawPayload = extractRawCapture(contents) || JSON.parse(contents);
+          const result = await reconstructFromRawCapture(
+            rawPayload,
+            {},
+            (stage, progress) => {
+              setReconstructing({ stage, progress });
+            },
+          );
+          setReconstructing(null);
+          setSurfaceScan(result);
+          setStage("surface");
+          setError("");
+        }
+      } else if (hasRaw) {
         setReconstructing({ stage: "Preparing keyframes…", progress: 2 });
         const rawPayload = extractRawCapture(contents) || JSON.parse(contents);
         const result = await reconstructFromRawCapture(
@@ -154,10 +175,6 @@ export default function ScanSpace() {
         );
         setReconstructing(null);
         setSurfaceScan(result);
-        setStage("surface");
-        setError("");
-      } else if (scanFile) {
-        setSurfaceScan(parseScanFile(contents));
         setStage("surface");
         setError("");
       } else {

@@ -1,4 +1,4 @@
-import { restoreDepthCapture } from "./captureDebug.js";
+import { restoreDepthCapture, restoreKeyframeImages } from "./captureDebug.js";
 import { buildScanCloud } from "./scanCloud.js";
 import { FLOOR_OUTLIER_TOLERANCE_METERS } from "./readiness.js";
 import { fuseRgbdKeyframes } from "./fusion.js";
@@ -46,6 +46,7 @@ export async function reconstructFromRawCapture(
   };
 
   onProgress("preparing", 2);
+  await restoreKeyframeImages(keyframes);
 
   let fused;
   const worker = createFusionWorker();

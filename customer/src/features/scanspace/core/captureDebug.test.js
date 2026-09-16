@@ -63,3 +63,29 @@ test("rejects malformed replay dimensions before reconstruction allocates geomet
   expect(() => restoreDepthCapture({ keyframes: [{ columns: 999999, rows: 999999 }] }))
     .toThrow(/dimensions/);
 });
+
+test("preserves colorImageDataUrl and camera dimensions through snapshot and restoration", () => {
+  const matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const frame = {
+    columns: 2,
+    rows: 2,
+    depths: [1, 1, 1, 1],
+    positions: [0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1],
+    colors: [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255],
+    colorMask: [1, 1, 1, 1],
+    projectionMatrix: matrix,
+    transformMatrix: matrix,
+    colorImageDataUrl: "data:image/jpeg;base64,/9j/mock",
+    colorWidth: 640,
+    colorHeight: 480,
+    colorChannels: 4,
+  };
+  const snapshot = snapshotDepthCapture({ keyframes: [frame], stats: {}, floorY: 0 });
+  expect(snapshot).toBeDefined();
+
+  const restored = restoreDepthCapture({ capture: { keyframes: [frame], floorY: 0 } });
+  expect(restored.keyframes[0].colorImageDataUrl).toBe("data:image/jpeg;base64,/9j/mock");
+  expect(restored.keyframes[0].colorWidth).toBe(640);
+  expect(restored.keyframes[0].colorHeight).toBe(480);
+});
+
