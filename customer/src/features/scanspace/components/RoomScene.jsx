@@ -411,11 +411,12 @@ function CameraControls({ room, mode, input, reset, dragging }) {
     };
     const key = (e) => {
       if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+      if (e.code === "Space" && mode === "first") e.preventDefault();
       input.current.keys[e.code] = e.type === "keydown";
     };
     const blur = () => {
       input.current.keys = {};
-      input.current.x = input.current.y = 0;
+      input.current.x = input.current.y = input.current.elevation = 0;
     };
     el.addEventListener("pointerdown", down);
     el.addEventListener("pointermove", move);
@@ -443,15 +444,27 @@ function CameraControls({ room, mode, input, reset, dragging }) {
       k = i.keys,
       forward = -i.y + (k.KeyW ? 1 : 0) - (k.KeyS ? 1 : 0),
       right = i.x + (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0),
+      elevation =
+        (i.elevation || 0) +
+        (k.KeyE || k.Space ? 1 : 0) -
+        (k.KeyQ || k.KeyC || k.ShiftLeft || k.ShiftRight ? 1 : 0),
       speed =
         (Math.min(delta, 0.05) * 1.5) / Math.max(1, Math.hypot(forward, right)),
       yaw = angle.current.yaw;
     const dx = (Math.cos(yaw) * right - Math.sin(yaw) * forward) * speed,
-      dz = (-Math.sin(yaw) * right - Math.cos(yaw) * forward) * speed;
+      dz = (-Math.sin(yaw) * right - Math.cos(yaw) * forward) * speed,
+      dy = elevation * (Math.min(delta, 0.05) * 1.35);
     if (walkable({ x: camera.position.x + dx, z: camera.position.z }, room))
       camera.position.x += dx;
     if (walkable({ x: camera.position.x, z: camera.position.z + dz }, room))
       camera.position.z += dz;
+    const minY = 0.25;
+    const maxY = Math.max(1.8, (room?.ceilingHeight || 2.8) - 0.05);
+    camera.position.y = THREE.MathUtils.clamp(
+      camera.position.y + dy,
+      minY,
+      maxY,
+    );
   });
   return mode === "first" ? null : (
     <OrbitControls
@@ -496,7 +509,7 @@ export default function RoomScene({
   snap = true,
   snapWall = false,
 }) {
-  const input = useRef({ x: 0, y: 0, keys: {} }),
+  const input = useRef({ x: 0, y: 0, elevation: 0, keys: {} }),
     [low, setLow] = useState((navigator.hardwareConcurrency || 4) < 5),
     [dragging, setDragging] = useState(null),
     [dragPosition, setDragPosition] = useState(null),
@@ -596,6 +609,9 @@ export default function RoomScene({
   const clearJoystick = () => {
     input.current.x = input.current.y = 0;
     setKnob({ x: 0, y: 0 });
+  };
+  const setElevation = (value) => {
+    input.current.elevation = value;
   };
   return (
     <div className="ss-scene">
@@ -760,27 +776,116 @@ export default function RoomScene({
         </mesh>
       </Canvas>
       {mode === "first" && (
-        <div
-          className="ss-joystick"
-          role="group"
-          aria-label="Movement joystick"
-          onPointerDown={(e) => {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            joystick(e);
-          }}
-          onPointerMove={(e) => {
-            if (e.buttons) joystick(e);
-          }}
-          onPointerUp={clearJoystick}
-          onPointerCancel={clearJoystick}
-        >
-          <span style={{ transform: `translate(${knob.x}px,${knob.y}px)` }} />
-          <small>Move</small>
-        </div>
+        <>
+          <div
+            className="ss-joystick"
+            role="group"
+            aria-label="Movement joystick"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              joystick(e);
+            }}
+            onPointerMove={(e) => {
+              if (e.buttons) joystick(e);
+            }}
+            onPointerUp={clearJoystick}
+            onPointerCancel={clearJoystick}
+          >
+            <span style={{ transform: `translate(${knob.x}px,${knob.y}px)` }} />
+            <small>Move</small>
+          </div>
+          <div
+            className="ss-elevation-control"
+            role="group"
+            aria-label="Elevation control"
+          >
+            <button
+              type="button"
+              className="ss-elevation-btn ss-elevation-up"
+              aria-label="Move camera up"
+              title="Move up (E or Space)"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                try {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(1);
+              }}
+              onPointerUp={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerCancel={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerLeave={() => setElevation(0)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M18 15l-6-6-6 6" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="ss-elevation-btn ss-elevation-down"
+              aria-label="Move camera down"
+              title="Move down (Q, C or Shift)"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                try {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(-1);
+              }}
+              onPointerUp={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerCancel={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerLeave={() => setElevation(0)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            <small>Height</small>
+          </div>
+        </>
       )}
       <span className="ss-view-hint">
         {mode === "first"
-          ? "Drag to look · Joystick or WASD to walk"
+          ? "Drag to look · Move & height controls or WASD/QE"
           : mode === "top"
             ? "Drag objects to place · Pinch to zoom"
             : "Drag to orbit · Pinch to zoom"}

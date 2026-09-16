@@ -50,11 +50,12 @@ function ScanControls({ cloud, mode, input, view, reset }) {
     };
     const key = (event) => {
       if (/INPUT|SELECT|TEXTAREA/.test(event.target.tagName)) return;
+      if (event.code === "Space" && mode === "first") event.preventDefault();
       input.current.keys[event.code] = event.type === "keydown";
     };
     const blur = () => {
       input.current.keys = {};
-      input.current.x = input.current.y = 0;
+      input.current.x = input.current.y = input.current.elevation = 0;
     };
     element.addEventListener("pointerdown", down);
     element.addEventListener("pointermove", move);
@@ -83,6 +84,10 @@ function ScanControls({ cloud, mode, input, view, reset }) {
     const forward =
       -controls.y + (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
     const right = controls.x + (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+    const elevation =
+      (controls.elevation || 0) +
+      (keys.KeyE || keys.Space ? 1 : 0) -
+      (keys.KeyQ || keys.KeyC || keys.ShiftLeft || keys.ShiftRight ? 1 : 0);
     const speed =
       (Math.min(delta, 0.05) * 1.35) /
       Math.max(1, Math.hypot(forward, right));
@@ -94,6 +99,7 @@ function ScanControls({ cloud, mode, input, view, reset }) {
       (-Math.sin(angle.current.yaw) * right -
         Math.cos(angle.current.yaw) * forward) *
       speed;
+    const dy = elevation * (Math.min(delta, 0.05) * 1.25);
     const padding = 0.7;
     camera.position.x = THREE.MathUtils.clamp(
       camera.position.x + dx,
@@ -104,6 +110,13 @@ function ScanControls({ cloud, mode, input, view, reset }) {
       camera.position.z + dz,
       cloud.bounds.min.z - padding,
       cloud.bounds.max.z + padding,
+    );
+    const minY = cloud.bounds ? Math.max(0.2, cloud.bounds.min.y + 0.2) : 0.2;
+    const maxY = cloud.bounds ? Math.max(minY + 1.2, cloud.bounds.max.y + 0.6) : 4.5;
+    camera.position.y = THREE.MathUtils.clamp(
+      camera.position.y + dy,
+      minY,
+      maxY,
     );
   });
   return mode === "first" ? null : (
@@ -122,7 +135,7 @@ export default function PartialScanScene({ scan }) {
   const [low, setLow] = useState(false);
   const [reset, setReset] = useState(0);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
-  const input = useRef({ x: 0, y: 0, keys: {} });
+  const input = useRef({ x: 0, y: 0, elevation: 0, keys: {} });
   const mesh = scan.mesh;
   const cloud = scan.cloud;
   const visual = mesh || cloud;
@@ -167,6 +180,9 @@ export default function PartialScanScene({ scan }) {
   const clearJoystick = () => {
     input.current.x = input.current.y = 0;
     setKnob({ x: 0, y: 0 });
+  };
+  const setElevation = (value) => {
+    input.current.elevation = value;
   };
   if (!visual)
     return <div className="ss-notice">Captured depth is unavailable.</div>;
@@ -221,27 +237,116 @@ export default function PartialScanScene({ scan }) {
         </button>
       </div>
       {mode === "first" && (
-        <div
-          className="ss-joystick"
-          role="group"
-          aria-label="Movement joystick"
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            joystick(event);
-          }}
-          onPointerMove={(event) => {
-            if (event.buttons) joystick(event);
-          }}
-          onPointerUp={clearJoystick}
-          onPointerCancel={clearJoystick}
-        >
-          <span style={{ transform: `translate(${knob.x}px,${knob.y}px)` }} />
-          <small>Move</small>
-        </div>
+        <>
+          <div
+            className="ss-joystick"
+            role="group"
+            aria-label="Movement joystick"
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              joystick(event);
+            }}
+            onPointerMove={(event) => {
+              if (event.buttons) joystick(event);
+            }}
+            onPointerUp={clearJoystick}
+            onPointerCancel={clearJoystick}
+          >
+            <span style={{ transform: `translate(${knob.x}px,${knob.y}px)` }} />
+            <small>Move</small>
+          </div>
+          <div
+            className="ss-elevation-control"
+            role="group"
+            aria-label="Elevation control"
+          >
+            <button
+              type="button"
+              className="ss-elevation-btn ss-elevation-up"
+              aria-label="Move camera up"
+              title="Move up (E or Space)"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                try {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(1);
+              }}
+              onPointerUp={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerCancel={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerLeave={() => setElevation(0)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M18 15l-6-6-6 6" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="ss-elevation-btn ss-elevation-down"
+              aria-label="Move camera down"
+              title="Move down (Q, C or Shift)"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                try {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(-1);
+              }}
+              onPointerUp={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerCancel={(e) => {
+                try {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                setElevation(0);
+              }}
+              onPointerLeave={() => setElevation(0)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            <small>Height</small>
+          </div>
+        </>
       )}
       <span className="ss-view-hint">
         {mode === "first"
-          ? "Drag to look · Use the joystick to move"
+          ? "Drag to look · Move & height controls or WASD/QE"
           : "Drag to orbit · Pinch to zoom"}
       </span>
       <span className="ss-partial-legend" role="status">

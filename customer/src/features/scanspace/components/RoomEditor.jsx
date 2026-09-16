@@ -362,7 +362,7 @@ export default function RoomEditor({ onExit }) {
         </div>
       </header>
       <div className="ss-editor-body">
-        <div className="ss-viewport">
+        <div className="ss-viewport" data-mode={s.mode}>
           <div className="ss-viewbar">
             <div role="group" aria-label="Room view">
               {[
