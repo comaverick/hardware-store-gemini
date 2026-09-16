@@ -2778,7 +2778,7 @@ export function measuredSurfaceQualityDiagnostics(mesh, gridSize = 20) {
       accumulatedArea += entry.area;
       return accumulatedArea >= halfArea;
     })?.value || 0;
-  const layerTolerance = 0.11;
+  const layerTolerance = 0.075;
   const layer = aligned.filter(
     (record) =>
       Math.abs(
@@ -2930,8 +2930,8 @@ export function measuredSurfaceQualityDiagnostics(mesh, gridSize = 20) {
     competingLayerCoverage,
     competingLayerOverlapRatio,
     duplicateLayerLikely:
-      competingLayerCoverage >= 0.15 &&
-      competingLayerOverlapRatio >= 0.45,
+      competingLayerCoverage >= 0.08 &&
+      competingLayerOverlapRatio >= 0.35,
     enclosedEmptyCells,
     interiorMissingRatio:
       enclosedEmptyCells / Math.max(1, occupiedCells + enclosedEmptyCells),
@@ -3141,8 +3141,8 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
     };
     const offset = nx * center.x + ny * center.y + nz * center.z;
     const area = twiceArea * 0.5;
-    const angleBin = Math.round(Math.atan2(nz, nx) / (Math.PI / 36));
-    const offsetBin = Math.round(offset / 0.08);
+    const angleBin = Math.round(Math.atan2(nz, nx) / (Math.PI / 18));
+    const offsetBin = Math.round(offset / 0.12);
     const key = `${angleBin},${offsetBin}`;
     const group = groups.get(key) || { area: 0, nx: 0, ny: 0, nz: 0, offset: 0 };
     group.area += area;
@@ -3175,14 +3175,23 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
         candidate.ny * existing.ny +
         candidate.nz * existing.nz;
       const offsetDiff = Math.abs(candidate.offset - existing.offset);
-      // Merge candidate duplicate sheets: similar normal and within 45cm
-      if (Math.abs(dot) >= 0.84 && offsetDiff <= 0.45) {
+      // Merge candidate duplicate sheets: similar normal (within 38 deg) and within 45cm
+      if (Math.abs(dot) >= 0.78 && offsetDiff <= 0.45) {
         duplicateOf = existing;
         break;
       }
     }
     if (!duplicateOf) {
-      if (planes.length < maxPlanes) {
+      // Check if candidate is a step artifact between existing parallel walls
+      const isStepArtifact = planes.some((existing) => {
+        const dot = candidate.nx * existing.nx + candidate.nz * existing.nz;
+        return (
+          Math.abs(dot) > 0.40 &&
+          Math.abs(dot) < 0.80 &&
+          candidate.area < existing.area * 0.6
+        );
+      });
+      if (!isStepArtifact && planes.length < maxPlanes) {
         planes.push({ ...candidate });
       }
     } else {
@@ -3215,10 +3224,10 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
 
   const positions = new Float32Array(mesh.positions);
   const normals = computeNormals(mesh);
-  const distanceLimit = Math.min(0.38, Math.max(0.08, voxelSize * 6.5));
+  const distanceLimit = Math.min(0.38, Math.max(0.20, voxelSize * 8.5));
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const normalOffset = vertex * 3;
-    if (Math.abs(normals[normalOffset + 1]) > 0.42) continue;
+    if (Math.abs(normals[normalOffset + 1]) > 0.45) continue;
     let best = null;
     planes.forEach((plane) => {
       const alignment = Math.abs(
@@ -3226,20 +3235,22 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
         normals[normalOffset + 1] * plane.ny +
         normals[normalOffset + 2] * plane.nz,
       );
-      if (alignment < 0.72) return;
       const distance =
         positions[normalOffset] * plane.nx +
         positions[normalOffset + 1] * plane.ny +
         positions[normalOffset + 2] * plane.nz -
         plane.offset;
       if (Math.abs(distance) > distanceLimit) return;
-      if (!best || Math.abs(distance) < Math.abs(best.distance)) best = { plane, distance };
+      // Allow transition seam vertices (whose normals were tilted by step triangles)
+      // to snap to the dominant wall plane if close, preventing permanent creases
+      if (alignment < 0.42 && Math.abs(distance) > 0.18) return;
+      const score = Math.abs(distance) - alignment * 0.04;
+      if (!best || score < best.score) best = { plane, distance, score };
     });
     if (!best) continue;
-    const pullFactor = Math.abs(best.distance) > 0.04 ? 0.98 : 0.88;
-    positions[normalOffset] -= best.plane.nx * best.distance * pullFactor;
-    positions[normalOffset + 1] -= best.plane.ny * best.distance * pullFactor;
-    positions[normalOffset + 2] -= best.plane.nz * best.distance * pullFactor;
+    positions[normalOffset] -= best.plane.nx * best.distance;
+    positions[normalOffset + 1] -= best.plane.ny * best.distance;
+    positions[normalOffset + 2] -= best.plane.nz * best.distance;
   }
   return { ...mesh, positions, stabilizedPlaneCount: planes.length };
 }
@@ -3401,7 +3412,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
 
   samples.sort((left, right) => left.height - right.height);
   const clusters = [];
-  const clusterDistance = Math.max(0.065, voxelSize * 2.2);
+  const clusterDistance = Math.max(0.12, voxelSize * 3.5);
   samples.forEach((sample) => {
     const cluster = clusters[clusters.length - 1];
     if (!cluster || Math.abs(sample.height - cluster.height) > clusterDistance) {
@@ -3442,7 +3453,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
     adjacency[b].add(a); adjacency[b].add(c);
     adjacency[c].add(a); adjacency[c].add(b);
   }
-  const distanceLimit = clamp(voxelSize * 2.8, 0.05, 0.10);
+  const distanceLimit = clamp(voxelSize * 5.0, 0.12, 0.25);
   let stabilizedHorizontalVertexCount = 0;
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const offset = vertex * 3;
@@ -3463,7 +3474,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
       residuals[Math.floor(residuals.length / 2)] > distanceLimit * 0.85
     )
       continue;
-    positions[offset + 1] -= closest * 0.95;
+    positions[offset + 1] -= closest;
     stabilizedHorizontalVertexCount++;
   }
   return {
@@ -5562,12 +5573,6 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
         issues: measuredSurfaceWarnings,
       }
     : null;
-  const measuredPositions = surface.positions;
-  surface = stabilizeDominantWalls(
-    surface,
-    volumeVoxelSize,
-    stages.rectangularRoomModelCompatible ? 4 : 6,
-  );
   surface = pruneBoundarySpikes(surface);
   surface = smoothPositions(
     surface,
@@ -5575,9 +5580,12 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
       (options.completionMode === "surface" ? 3 : 4),
     volumeVoxelSize,
   );
-  // Smooth first, then return supported wall vertices to their measured plane.
-  // The previous order allowed the smoothing pass to reintroduce bowed trim
-  // and wall lines immediately after they had been straightened.
+  surface = stabilizeDominantWalls(
+    surface,
+    volumeVoxelSize,
+    stages.rectangularRoomModelCompatible ? 4 : 6,
+  );
+  // Return supported wall vertices to their measured plane after smoothing.
   if (measuredSurfaceQuality?.assessed)
     surface = stabilizeMeasuredWallSectors(
       surface,
@@ -5590,7 +5598,7 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
     5,
   );
   const constrained = constrainSurfaceDeformation(
-    { ...surface, positions: measuredPositions },
+    surface,
     surface.positions,
   );
   surface = { ...surface, positions: constrained.positions };
