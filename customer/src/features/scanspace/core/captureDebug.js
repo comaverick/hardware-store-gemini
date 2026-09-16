@@ -5,7 +5,7 @@ export function captureDebugEnabled() {
   return new URLSearchParams(window.location.search).get("scanspaceDebug") === "1";
 }
 
-export function snapshotDepthCapture(raw) {
+export function snapshotDepthCaptureData(raw) {
   const header = {
     version: 4,
     geometrySchemaVersion: 1,
@@ -27,45 +27,43 @@ export function snapshotDepthCapture(raw) {
     stats: raw.stats,
     cameraImagesIncluded: false,
   };
-  const parts = [JSON.stringify(header).slice(0, -1), ',"keyframes":['];
-  raw.keyframes.forEach((frame, index) => {
-    if (index) parts.push(",");
-    parts.push(JSON.stringify({
-      columns: frame.columns,
-      rows: frame.rows,
-      validCount: frame.validCount,
-      coloredCount: frame.coloredCount,
-      tracking: frame.tracking,
-      timestamp: frame.timestamp,
-      linearSpeed: frame.linearSpeed || 0,
-      angularSpeed: frame.angularSpeed || 0,
-      depthQuality: frame.depthQuality || 0,
-      measuredDepthCount: frame.measuredDepthCount || 0,
-      colorSharpness: frame.colorSharpness || 0,
-      colorClippedRatio: frame.colorClippedRatio || 0,
-      geometryMode: frame.geometryMode,
-      nativeDepthWidth: frame.nativeDepthWidth,
-      nativeDepthHeight: frame.nativeDepthHeight,
-      nativeDepthUvTransform: Array.from(
-        frame.nativeDepthUvTransform || [],
-      ),
-      depths: Array.from(frame.depths),
-      positions: Array.from(frame.positions),
-      colors: Array.from(frame.colors),
-      colorMask: Array.from(frame.colorMask),
-      projectionMatrix: Array.from(frame.projectionMatrix),
-      transformMatrix: Array.from(frame.transformMatrix),
-      viewProjectionMatrix: Array.from(
-        frame.viewProjectionMatrix || frame.projectionMatrix,
-      ),
-      viewTransformMatrix: Array.from(
-        frame.viewTransformMatrix || frame.transformMatrix,
-      ),
-      camera: Array.from(frame.camera || []),
-    }));
-  });
-  parts.push("]}");
-  return new Blob(parts, { type: "application/json" });
+  const keyframes = (raw.keyframes || []).map((frame) => ({
+    columns: frame.columns,
+    rows: frame.rows,
+    validCount: frame.validCount,
+    coloredCount: frame.coloredCount,
+    tracking: frame.tracking,
+    timestamp: frame.timestamp,
+    linearSpeed: frame.linearSpeed || 0,
+    angularSpeed: frame.angularSpeed || 0,
+    depthQuality: frame.depthQuality || 0,
+    measuredDepthCount: frame.measuredDepthCount || 0,
+    colorSharpness: frame.colorSharpness || 0,
+    colorClippedRatio: frame.colorClippedRatio || 0,
+    geometryMode: frame.geometryMode,
+    nativeDepthWidth: frame.nativeDepthWidth,
+    nativeDepthHeight: frame.nativeDepthHeight,
+    nativeDepthUvTransform: Array.from(frame.nativeDepthUvTransform || []),
+    depths: Array.from(frame.depths),
+    positions: Array.from(frame.positions),
+    colors: Array.from(frame.colors),
+    colorMask: Array.from(frame.colorMask),
+    projectionMatrix: Array.from(frame.projectionMatrix),
+    transformMatrix: Array.from(frame.transformMatrix),
+    viewProjectionMatrix: Array.from(
+      frame.viewProjectionMatrix || frame.projectionMatrix,
+    ),
+    viewTransformMatrix: Array.from(
+      frame.viewTransformMatrix || frame.transformMatrix,
+    ),
+    camera: Array.from(frame.camera || []),
+  }));
+  return { ...header, keyframes };
+}
+
+export function snapshotDepthCapture(raw) {
+  const data = snapshotDepthCaptureData(raw);
+  return new Blob([JSON.stringify(data)], { type: "application/json" });
 }
 
 export function downloadDepthCapture(blob, diagnostics = null) {

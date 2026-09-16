@@ -2,6 +2,8 @@ import {
   looksLikePartialScan,
   parsePartialScan,
   serializePartialScan,
+  hasRawCapture,
+  extractRawCapture,
 } from "./partialScanFile";
 
 function measuredScan() {
@@ -81,4 +83,23 @@ test("portable exports retain the live mesh texture when it fits", () => {
   );
   expect(Array.from(restored.mesh.uvs)).toEqual([0, 0, 1, 0, 0, 1]);
   expect(restored.mesh.portableColors).toBe(false);
+});
+
+test("rawCapture survives serialization and is detected by hasRawCapture/extractRawCapture", () => {
+  const scan = measuredScan();
+  scan.rawCapture = {
+    version: 4,
+    floorY: 0,
+    keyframes: [{ columns: 2, rows: 2, depths: [1, 1, 1, 1] }],
+  };
+  const serialized = serializePartialScan(scan);
+  expect(hasRawCapture(serialized)).toBe(true);
+
+  const extracted = extractRawCapture(serialized);
+  expect(extracted.keyframes).toHaveLength(1);
+  expect(extracted.keyframes[0].columns).toBe(2);
+
+  const restored = parsePartialScan(serialized);
+  expect(restored.rawCapture).toBeDefined();
+  expect(restored.rawCapture.keyframes).toHaveLength(1);
 });

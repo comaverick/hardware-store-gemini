@@ -309,11 +309,46 @@ export function looksLikeScanFile(beginning = "") {
 
 export const looksLikePartialScan = looksLikeScanFile;
 
+export function hasRawCapture(value) {
+  if (!value) return false;
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return false;
+    }
+  }
+  return Boolean(
+    parsed?.scan?.rawCapture?.keyframes?.length ||
+      parsed?.rawCapture?.keyframes?.length ||
+      parsed?.capture?.keyframes?.length ||
+      parsed?.keyframes?.length,
+  );
+}
+
+export function extractRawCapture(value) {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return (
+    parsed?.scan?.rawCapture ||
+    parsed?.rawCapture ||
+    parsed?.capture ||
+    (parsed?.keyframes ? parsed : null)
+  );
+}
+
 export function serializePartialScan(scan) {
-  if (!scan?.mesh && !scan?.cloud)
+  if (!scan?.mesh && !scan?.cloud && !scan?.rawCapture)
     throw new Error("There is no measured surface to export.");
   const mesh = canIncludeMesh(scan.mesh) ? encodeMesh(scan.mesh) : null;
-  if (!mesh && !scan.cloud)
+  if (!mesh && !scan.cloud && !scan.rawCapture)
     throw new Error(
       "This measured mesh is too large to export without its point-cloud preview.",
     );
@@ -331,6 +366,7 @@ export function serializePartialScan(scan) {
       fusionReason: scan.fusionReason
         ? String(scan.fusionReason).slice(0, 500)
         : null,
+      rawCapture: scan.rawCapture || null,
       mesh,
       cloud: encodeCloud(scan.cloud),
     },
@@ -340,7 +376,7 @@ export function serializePartialScan(scan) {
 export function parsePartialScan(value) {
   let parsed;
   try {
-    parsed = JSON.parse(value);
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
   } catch {
     throw new Error("This scan file is not valid JSON.");
   }
@@ -352,7 +388,7 @@ export function parsePartialScan(value) {
   const source = parsed.scan;
   const mesh = decodeMesh(source?.mesh);
   const cloud = decodeCloud(source?.cloud);
-  if (!mesh && !cloud)
+  if (!mesh && !cloud && !source?.rawCapture)
     throw new Error("This scan file does not contain measured geometry.");
   return {
     version: 2,
@@ -366,6 +402,7 @@ export function parsePartialScan(value) {
     reason: String(source.reason || "Captured measured surfaces.").slice(0, 500),
     cloud,
     mesh,
+    rawCapture: source?.rawCapture || null,
     fusionMode: "portable-import",
     captureQuality: source.captureQuality || null,
     measuredGapWarning: !!source.measuredGapWarning,

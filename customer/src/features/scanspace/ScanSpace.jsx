@@ -22,7 +22,10 @@ import {
   looksLikeScanFile,
   MAX_SCAN_FILE_IMPORT_BYTES,
   parseScanFile,
+  hasRawCapture,
+  extractRawCapture,
 } from "./core/partialScanFile";
+import { reconstructFromRawCapture } from "./core/reconstructCapture";
 import { useScanSpace, sampleRoom } from "./store";
 import {
   api,
@@ -49,7 +52,8 @@ export default function ScanSpace() {
     [capture, setCapture] = useState({}),
     [error, setError] = useState(""),
     [draft, setDraft] = useState(false),
-    [savedOpen, setSavedOpen] = useState(false);
+    [savedOpen, setSavedOpen] = useState(false),
+    [reconstructing, setReconstructing] = useState(null);
   const transferStarted = useRef(false);
   const demo = useMemo(() => sampleRoom(), []);
   useEffect(() => {
@@ -123,11 +127,8 @@ export default function ScanSpace() {
     if (!file) return;
     try {
       const beginning = await file.slice(0, 65536).text();
-      const scanFile = looksLikeScanFile(beginning);
-      if (looksLikeScanDiagnostics(file.name, beginning))
-        throw new Error(
-          "This is a scan-diagnostics file, not a ScanSpace scan. Import a saved scan or room export instead.",
-        );
+      const isRawDiagnostics = looksLikeScanDiagnostics(file.name, beginning);
+      const scanFile = looksLikeScanFile(beginning) || isRawDiagnostics;
       const limit = scanFile
         ? MAX_SCAN_FILE_IMPORT_BYTES
         : MAX_ROOM_IMPORT_BYTES;
@@ -138,7 +139,22 @@ export default function ScanSpace() {
             : "Saved room files can be up to 10 MB.",
         );
       const contents = await file.text();
-      if (scanFile) {
+      const hasRaw = hasRawCapture(contents) || isRawDiagnostics;
+      if (hasRaw) {
+        setReconstructing({ stage: "Preparing keyframes…", progress: 2 });
+        const rawPayload = extractRawCapture(contents) || JSON.parse(contents);
+        const result = await reconstructFromRawCapture(
+          rawPayload,
+          {},
+          (stage, progress) => {
+            setReconstructing({ stage, progress });
+          },
+        );
+        setReconstructing(null);
+        setSurfaceScan(result);
+        setStage("surface");
+        setError("");
+      } else if (scanFile) {
         setSurfaceScan(parseScanFile(contents));
         setStage("surface");
         setError("");
@@ -146,6 +162,7 @@ export default function ScanSpace() {
         openRoom(parseRoomImport(contents));
       }
     } catch (reason) {
+      setReconstructing(null);
       setError(reason.message || "The ScanSpace file could not be opened.");
     } finally {
       input.value = "";
@@ -330,6 +347,7 @@ export default function ScanSpace() {
         >
           <PartialScanReview
             scan={surfaceScan}
+            onUpdateScan={setSurfaceScan}
             onCompleteManually={() => {
               setReviewRoom(null);
               setCapture({
@@ -413,6 +431,32 @@ export default function ScanSpace() {
           onClose={() => setSavedOpen(false)}
           onLoad={openSavedProject}
         />
+      )}
+      {reconstructing && (
+        <div className="ss-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="ss-reconstruct-modal">
+            <div className="ss-spinner" />
+            <h3>Re-rendering 3D Scan</h3>
+            <p className="ss-reconstruct-stage">
+              {reconstructing.stage
+                ? reconstructing.stage.charAt(0).toUpperCase() +
+                  reconstructing.stage.slice(1)
+                : "Processing…"}
+              {Number.isFinite(reconstructing.progress)
+                ? ` (${Math.round(reconstructing.progress)}%)`
+                : ""}
+            </p>
+            <div className="ss-progress-bar">
+              <div
+                className="ss-progress-fill"
+                style={{
+                  width: `${Math.max(5, Math.min(100, reconstructing.progress || 0))}%`,
+                }}
+              />
+            </div>
+            <small>Applying latest 3D reconstruction & surface engine</small>
+          </div>
+        </div>
       )}
     </main>
   );

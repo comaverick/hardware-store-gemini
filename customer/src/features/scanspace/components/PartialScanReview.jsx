@@ -1,15 +1,24 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { CheckCircle, Info, WarningCircle } from "@phosphor-icons/react";
 import PartialScanScene from "./PartialScanScene";
 import { downloadDepthCapture } from "../core/captureDebug";
 import { downloadScan } from "../core/partialScanFile";
+import { reconstructFromRawCapture } from "../core/reconstructCapture";
+
 export default function PartialScanReview({
   scan,
+  onUpdateScan,
   onCompleteManually,
   onRescan,
   onDone,
 }) {
+  const [currentScan, setCurrentScan] = useState(scan);
+  const [recomputing, setRecomputing] = useState(null);
   const [exportError, setExportError] = useState("");
+
+  useEffect(() => {
+    setCurrentScan(scan);
+  }, [scan]);
   return (
     <section className="ss-partial-review">
       <header>
@@ -50,36 +59,48 @@ export default function PartialScanReview({
           </p>
         </div>
       ) : null}
-      <PartialScanScene scan={scan} />
+      <PartialScanScene scan={currentScan} />
       <div className="ss-partial-facts" aria-label="Scan measurements">
         <div>
           <strong>
-            {scan.mesh
-              ? scan.mesh.triangleCount.toLocaleString()
-              : scan.cloud?.count?.toLocaleString() || 0}
+            {currentScan.mesh
+              ? currentScan.mesh.triangleCount.toLocaleString()
+              : currentScan.cloud?.count?.toLocaleString() || 0}
           </strong>
-          <span>{scan.mesh ? "measured triangles" : "captured depth points"}</span>
+          <span>
+            {currentScan.mesh
+              ? "measured triangles"
+              : "captured depth points"}
+          </span>
         </div>
         <div>
           <strong>
-            {scan.mesh?.textureCoverage ??
-              scan.mesh?.colorCoverage ??
-              scan.cloud?.colorCoverage ??
+            {currentScan.mesh?.textureCoverage ??
+              currentScan.mesh?.colorCoverage ??
+              currentScan.cloud?.colorCoverage ??
               0}%
           </strong>
-          <span>{scan.mesh ? "surface color coverage" : "point color coverage"}</span>
+          <span>
+            {currentScan.mesh
+              ? "surface color coverage"
+              : "point color coverage"}
+          </span>
         </div>
       </div>
-      {scan.fusionReason && (
+      {currentScan.fusionReason && (
         <div className="ss-notice ss-notice--status">
           <div className="ss-notice-title">
             <Info size={17} weight="fill" aria-hidden="true" />
-            <strong>{scan.mesh ? "Measured surface" : "Surface preview fallback"}</strong>
+            <strong>
+              {currentScan.mesh
+                ? "Measured surface"
+                : "Surface preview fallback"}
+            </strong>
           </div>
           <p>
-            {scan.mesh
-              ? scan.fusionReason
-              : `Surface reconstruction fallback: ${scan.fusionReason} The measured RGB-D points are shown instead.`}
+            {currentScan.mesh
+              ? currentScan.fusionReason
+              : `Surface reconstruction fallback: ${currentScan.fusionReason} The measured RGB-D points are shown instead.`}
           </p>
         </div>
       )}
@@ -94,7 +115,7 @@ export default function PartialScanReview({
           room layout.
         </p>
         <p className="ss-notice-detail">
-          <strong>Structural detection status:</strong> {scan.reason}
+          <strong>Structural detection status:</strong> {currentScan.reason}
         </p>
       </div>
       {exportError && (
@@ -103,11 +124,40 @@ export default function PartialScanReview({
         </p>
       )}
       <div className="ss-actions">
+        {currentScan.rawCapture && (
+          <button
+            type="button"
+            disabled={Boolean(recomputing)}
+            onClick={async () => {
+              setRecomputing({ stage: "Preparing keyframes…", progress: 2 });
+              setExportError("");
+              try {
+                const refreshed = await reconstructFromRawCapture(
+                  currentScan.rawCapture,
+                  {},
+                  (stage, progress) => setRecomputing({ stage, progress }),
+                );
+                setCurrentScan(refreshed);
+                onUpdateScan?.(refreshed);
+              } catch (reason) {
+                setExportError(
+                  reason.message || "Re-rendering failed.",
+                );
+              } finally {
+                setRecomputing(null);
+              }
+            }}
+          >
+            {recomputing
+              ? `Re-rendering (${Math.round(recomputing.progress || 0)}%)…`
+              : "Re-render with latest engine"}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {
             try {
-              downloadScan(scan);
+              downloadScan(currentScan);
               setExportError("");
             } catch (reason) {
               setExportError(
@@ -118,9 +168,16 @@ export default function PartialScanReview({
         >
           Export scan
         </button>
-        {scan.debugCapture && (
-          <button type="button" onClick={() =>
-            downloadDepthCapture(scan.debugCapture, scan.fusionDiagnostics)}>
+        {currentScan.debugCapture && (
+          <button
+            type="button"
+            onClick={() =>
+              downloadDepthCapture(
+                currentScan.debugCapture,
+                currentScan.fusionDiagnostics,
+              )
+            }
+          >
             Download scan diagnostics
           </button>
         )}

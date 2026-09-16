@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { RoomScanner } from "../xr/RoomScanner";
 import { buildScanCloud } from "../core/scanCloud";
-import { snapshotDepthCapture, downloadDepthCapture } from "../core/captureDebug";
+import {
+  snapshotDepthCapture,
+  snapshotDepthCaptureData,
+  downloadDepthCapture,
+} from "../core/captureDebug";
 import { FLOOR_OUTLIER_TOLERANCE_METERS } from "../core/readiness";
 
 function observationPoints(observations) {
@@ -331,7 +335,10 @@ export default function ScannerPanel({
     try {
       const raw = scanner.current.result();
       scanner.current.paused = true;
-      debugCapture.current = snapshotDepthCapture(raw);
+      const rawCaptureData = snapshotDepthCaptureData(raw);
+      debugCapture.current = new Blob([JSON.stringify(rawCaptureData)], {
+        type: "application/json",
+      });
       const fused = await buildFusedMesh(raw, true, "surface");
       raw.stats.fusion = fused.diagnostics;
       const acceptedPoints =
@@ -368,6 +375,7 @@ export default function ScannerPanel({
         mesh: fused.mesh,
         fusionMode: "multi-view",
         captureQuality: captureQualitySummary(raw.stats, fused.diagnostics),
+        rawCapture: rawCaptureData,
         debugCapture: debugCapture.current,
         fusionDiagnostics: fused.diagnostics,
         measuredGapWarning: fused.diagnostics?.measuredGapWarning || null,
