@@ -1628,23 +1628,20 @@ function integrateProjective(volume, frames, report) {
           }
           if (motionReliability < 0.8)
             volume.motionDownweightedSamples++;
-          // Once two observations establish a local TSDF value, use a Huber
-          // influence curve for later disagreement. This stops a slightly
-          // drifted view from bending a straight wall or producing a doubled
-          // shelf, while retaining that view's genuinely new measured area.
-          if (volume.viewpointCounts[index] >= 2 && previousWeight > 0.2) {
+          // Once an observation establishes a local TSDF value, use a robust
+          // Huber influence curve for later disagreement. This stops a slightly
+          // drifted view from bending a straight wall or melting thin shelves and
+          // bottles, while retaining that view's genuinely new measured area.
+          if (previousWeight > 0.15) {
             const residual = Math.abs(delta);
-            // Once independent views establish a local surface, a later TSDF
-            // sample that disagrees by almost a full truncation band is pose
-            // drift or another depth layer, not useful smoothing evidence.
-            // Reject it locally while retaining the frame's genuinely new
-            // regions elsewhere in the volume.
-            if (residual >= 0.82) {
+            // Reject secondary samples that deviate significantly from established surface
+            // to avoid smearing thin shelf posts, bottles, and decorative edges.
+            if (residual >= 0.52) {
               volume.robustlyRejectedSamples++;
               continue;
             }
-            const robustAgreement = residual > 0.34
-              ? clamp(((0.82 - residual) / 0.48) ** 2, 0.08, 1)
+            const robustAgreement = residual > 0.25
+              ? clamp(((0.52 - residual) / 0.27) ** 2, 0.05, 1)
               : 1;
             if (robustAgreement < 0.999)
               volume.robustlyDownweightedSamples++;
@@ -2930,8 +2927,8 @@ export function measuredSurfaceQualityDiagnostics(mesh, gridSize = 20) {
     competingLayerCoverage,
     competingLayerOverlapRatio,
     duplicateLayerLikely:
-      competingLayerCoverage >= 0.08 &&
-      competingLayerOverlapRatio >= 0.35,
+      competingLayerCoverage >= 0.15 &&
+      competingLayerOverlapRatio >= 0.45,
     enclosedEmptyCells,
     interiorMissingRatio:
       enclosedEmptyCells / Math.max(1, occupiedCells + enclosedEmptyCells),
@@ -3031,7 +3028,28 @@ export function measuredSurfaceGapWarning(quality) {
 export function wallConsensusKeyframes(frames, quality, options = {}) {
   const walls = quality?.walls || [];
   if (!walls.length) return null;
+  const candidateWalls = walls.filter((w) => w.duplicateLayerLikely !== false);
+  const targetWalls = candidateWalls.length ? candidateWalls : walls;
+
   const scored = frames.map((frame) => {
+    const matrix = frame.transformMatrix;
+    let facesTargetWall = true;
+    if (matrix?.length >= 11) {
+      const dirX = -matrix[8];
+      const dirZ = -matrix[10];
+      const dirLen = Math.hypot(dirX, dirZ);
+      if (dirLen > 0.001) {
+        const camDirX = dirX / dirLen;
+        const camDirZ = dirZ / dirLen;
+        facesTargetWall = targetWalls.some((wall) => {
+          const dot = Math.abs(
+            camDirX * wall.dominantNormal.x + camDirZ * wall.dominantNormal.z,
+          );
+          return dot >= 0.35;
+        });
+      }
+    }
+
     let measured = 0;
     let consensus = 0;
     const stride = Math.max(1, Math.ceil(frame.filteredCount / 500));
@@ -3055,21 +3073,30 @@ export function wallConsensusKeyframes(frames, quality, options = {}) {
       )
         consensus++;
     }
+    const ratio = facesTargetWall ? consensus / Math.max(1, measured) : 1.0;
     return {
       frame,
       measured,
-      consensus,
-      ratio: consensus / Math.max(1, measured),
+      consensus: facesTargetWall ? consensus : Math.max(consensus, 8),
+      ratio,
+      facesTargetWall,
     };
   });
-  const ratios = scored.map((entry) => entry.ratio).sort((a, b) => a - b);
-  const medianRatio = ratios[Math.floor(ratios.length / 2)] || 0;
+  const ratios = scored
+    .filter((entry) => entry.facesTargetWall)
+    .map((entry) => entry.ratio)
+    .sort((a, b) => a - b);
+  const medianRatio = ratios.length
+    ? ratios[Math.floor(ratios.length / 2)]
+    : 1;
   const minimumRatio = Math.max(
     options.minimumAbsoluteRatio || 0.04,
     medianRatio * (options.minimumRelativeRatio || 0.45),
   );
   const kept = scored.filter(
-    (entry) => entry.consensus >= 8 && entry.ratio >= minimumRatio,
+    (entry) =>
+      !entry.facesTargetWall ||
+      (entry.consensus >= 8 && entry.ratio >= minimumRatio),
   );
   const minimumFrames = Math.max(
     3,
@@ -3089,6 +3116,7 @@ export function wallConsensusKeyframes(frames, quality, options = {}) {
       measured: entry.measured,
       consensus: entry.consensus,
       ratio: entry.ratio,
+      facesTargetWall: entry.facesTargetWall,
     })),
   };
 }
@@ -3259,7 +3287,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
   }
 
   const distanceLimit = Math.min(0.38, Math.max(0.20, voxelSize * 8.5));
-  const drywallTolerance = Math.max(0.015, voxelSize * 0.55);
+  const drywallTolerance = Math.max(0.016, voxelSize * 0.58);
 
   for (let vertex = 0; vertex < vertexCount; vertex++) {
     const normalOffset = vertex * 3;
@@ -4877,15 +4905,30 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
     }
     if (component.length < 4) continue;
     texturePatchCount++;
-    const frameCoverage = new Map();
+    const frameStats = new Map();
     component.forEach((recordIndex) => {
       const record = records[recordIndex];
       const bestLocalScore = record.candidates[0]?.score ?? -Infinity;
       record.candidates.forEach((candidate) => {
-        if (candidate.score < bestLocalScore - 0.72) return;
+        if (candidate.score < bestLocalScore - 1.2) return;
         const textureId = candidate.frame.textureId;
-        frameCoverage.set(textureId, (frameCoverage.get(textureId) || 0) + 1);
+        const stats = frameStats.get(textureId) || { count: 0, totalScore: 0 };
+        stats.count++;
+        stats.totalScore += candidate.score;
+        frameStats.set(textureId, stats);
       });
+    });
+    let dominantTextureId = null;
+    let dominantScore = -Infinity;
+    frameStats.forEach((stats, textureId) => {
+      const coverage = stats.count / component.length;
+      if (coverage >= 0.35) {
+        const composite = stats.totalScore + coverage * component.length * 2.0;
+        if (composite > dominantScore) {
+          dominantScore = composite;
+          dominantTextureId = textureId;
+        }
+      }
     });
     component.forEach((recordIndex) => {
       const record = records[recordIndex];
@@ -4894,11 +4937,12 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       let selected = record.selected;
       let selectedScore = -Infinity;
       record.candidates.forEach((candidate, candidateIndex) => {
-        if (candidate.score < bestLocalScore - 0.72) return;
-        const coverage =
-          (frameCoverage.get(candidate.frame.textureId) || 0) /
-          component.length;
-        const score = candidate.score + Math.min(1, coverage) * 0.72;
+        if (candidate.score < bestLocalScore - 1.2) return;
+        const stats = frameStats.get(candidate.frame.textureId);
+        const coverage = stats ? stats.count / component.length : 0;
+        const isDominant = candidate.frame.textureId === dominantTextureId;
+        const bonus = (isDominant ? 2.2 : 0) + Math.min(1, coverage) * 1.4;
+        const score = candidate.score + bonus;
         if (score > selectedScore) {
           selected = candidateIndex;
           selectedScore = score;
@@ -5653,6 +5697,10 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
       (options.completionMode === "surface" ? 3 : 4),
     volumeVoxelSize,
   );
+  const preStabilizationMesh = {
+    ...surface,
+    positions: new Float32Array(surface.positions),
+  };
   surface = stabilizeDominantWalls(
     surface,
     volumeVoxelSize,
@@ -5671,7 +5719,7 @@ export function fuseRgbdKeyframes(keyframes, options = {}, report) {
     5,
   );
   const constrained = constrainSurfaceDeformation(
-    surface,
+    preStabilizationMesh,
     surface.positions,
   );
   surface = { ...surface, positions: constrained.positions };
