@@ -42,6 +42,12 @@ test("room imports accept exports over 500 KB and reject diagnostics", () => {
       '{"capture":{"version":4',
     ),
   ).toBe(true);
+  expect(
+    looksLikeScanDiagnostics(
+      "agy-scanspace-debug-123.json",
+      '{"capture":{"version":4',
+    ),
+  ).toBe(true);
   expect(() =>
     parseRoomImport('{"capture":{"version":4,"keyframes":[]}}'),
   ).toThrow(/diagnostics file/i);

@@ -50,10 +50,12 @@ export function decodeJpegToRgba(dataUrl) {
         settled = true;
         resolve(null);
       }
-    }, 1500);
+    }, 6000);
 
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    if (!dataUrl.startsWith("data:")) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
       if (settled) return;
       settled = true;
@@ -198,7 +200,7 @@ export function downloadDepthCapture(blob, diagnostics = null) {
   const url = URL.createObjectURL(file);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `scanspace-debug-${Date.now()}.json`;
+  link.download = `agy-scanspace-debug-${Date.now()}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -262,7 +264,7 @@ export function restoreDepthCapture(payload) {
   });
   return {
     keyframes,
-    options: { floorY: capture.floorY, observer: capture.observer },
+    options: { floorY: capture.floorY, observer: capture.observer, stats: capture.stats },
     metadata: {
       captureVersion: capture.version || 1,
       geometrySchemaVersion: capture.geometrySchemaVersion || null,

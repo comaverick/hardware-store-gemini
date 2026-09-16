@@ -29,10 +29,16 @@ export async function reconstructFromRawCapture(
   if (!keyframes?.length)
     throw new Error("No valid depth keyframes found in raw scan capture.");
 
+  const headingCoverage =
+    restored.options?.stats?.coverage ??
+    payload?.stats?.coverage ??
+    payload?.scan?.stats?.coverage ??
+    0;
+
   const baseOptions = {
     floorY: restored.options.floorY,
     observer: restored.options.observer,
-    headingCoverage: 0,
+    headingCoverage,
     completionMode: "surface",
     reconstructionProfile: "quality",
     floorOutlierTolerance: FLOOR_OUTLIER_TOLERANCE_METERS,
@@ -107,6 +113,13 @@ export async function reconstructFromRawCapture(
     );
   }
 
+  const fallbackMesh =
+    options.fallbackMesh || payload?.mesh || payload?.scan?.mesh || null;
+  if (!fused.mesh.texture && fallbackMesh?.texture) {
+    onProgress("texturing", 98);
+    fused.mesh = fallbackMesh;
+  }
+
   const acceptedPoints = observationPoints(fused.observations) || [];
   const scanCloud = buildScanCloud(acceptedPoints, {
     floorY: restored.options.floorY,
@@ -118,7 +131,11 @@ export async function reconstructFromRawCapture(
   return {
     version: 2,
     kind: "validated-measured-surface",
-    name: payload?.name || payload?.scan?.name || "Re-rendered surface scan",
+    name:
+      options.name ||
+      payload?.name ||
+      payload?.scan?.name ||
+      "Re-rendered surface scan",
     walls: [],
     floorObserved: Number.isFinite(restored.options.floorY),
     ceilingObserved: false,
@@ -128,10 +145,19 @@ export async function reconstructFromRawCapture(
     cloud: scanCloud,
     mesh: fused.mesh,
     fusionMode: "multi-view-recomputed",
-    captureQuality: payload?.scan?.captureQuality || null,
+    captureQuality:
+      options.captureQuality ||
+      payload?.captureQuality ||
+      payload?.scan?.captureQuality ||
+      null,
     rawCapture: payload?.scan?.rawCapture || payload?.capture || payload,
     fusionDiagnostics: fused.diagnostics,
     measuredGapWarning: fused.diagnostics?.measuredGapWarning || null,
     measuredReviewWarning: fused.diagnostics?.measuredReviewWarning || null,
+    fusionReason:
+      options.fusionReason ||
+      payload?.fusionReason ||
+      payload?.scan?.fusionReason ||
+      null,
   };
 }

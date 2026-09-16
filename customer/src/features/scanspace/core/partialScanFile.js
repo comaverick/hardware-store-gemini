@@ -420,7 +420,7 @@ export function downloadPartialScan(scan) {
   );
   const link = document.createElement("a");
   link.href = url;
-  link.download = `scanspace-scan-${new Date()
+  link.download = `agy-scanspace-scan-${new Date()
     .toISOString()
     .replace(/[:.]/g, "-")}.json`;
   link.click();

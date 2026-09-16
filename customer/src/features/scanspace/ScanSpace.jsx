@@ -142,33 +142,21 @@ export default function ScanSpace() {
       }
       const contents = await file.text();
       const hasRaw = hasRawCapture(contents) || isRawDiagnostics;
-      if (scanFile && !isRawDiagnostics) {
-        const parsed = parseScanFile(contents);
-        if (parsed.mesh) {
-          setSurfaceScan(parsed);
-          setStage("surface");
-          setError("");
-        } else if (hasRaw) {
-          setReconstructing({ stage: "Preparing keyframes…", progress: 2 });
-          const rawPayload = extractRawCapture(contents) || JSON.parse(contents);
-          const result = await reconstructFromRawCapture(
-            rawPayload,
-            {},
-            (stage, progress) => {
-              setReconstructing({ stage, progress });
-            },
-          );
-          setReconstructing(null);
-          setSurfaceScan(result);
-          setStage("surface");
-          setError("");
+      if (hasRaw) {
+        let fallbackMesh = null;
+        if (scanFile && !isRawDiagnostics) {
+          try {
+            const parsed = parseScanFile(contents);
+            fallbackMesh = parsed?.mesh || null;
+          } catch {
+            // Ignore parse errors on fallback mesh
+          }
         }
-      } else if (hasRaw) {
         setReconstructing({ stage: "Preparing keyframes…", progress: 2 });
         const rawPayload = extractRawCapture(contents) || JSON.parse(contents);
         const result = await reconstructFromRawCapture(
           rawPayload,
-          {},
+          { fallbackMesh },
           (stage, progress) => {
             setReconstructing({ stage, progress });
           },
@@ -177,6 +165,15 @@ export default function ScanSpace() {
         setSurfaceScan(result);
         setStage("surface");
         setError("");
+      } else if (scanFile && !isRawDiagnostics) {
+        const parsed = parseScanFile(contents);
+        if (parsed.mesh) {
+          setSurfaceScan(parsed);
+          setStage("surface");
+          setError("");
+        } else {
+          throw new Error("This scan file does not contain measured geometry.");
+        }
       } else {
         openRoom(parseRoomImport(contents));
       }

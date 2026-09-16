@@ -3,7 +3,6 @@ import { CheckCircle, Info, WarningCircle } from "@phosphor-icons/react";
 import PartialScanScene from "./PartialScanScene";
 import { downloadDepthCapture } from "../core/captureDebug";
 import { downloadScan } from "../core/partialScanFile";
-import { reconstructFromRawCapture } from "../core/reconstructCapture";
 
 export default function PartialScanReview({
   scan,
@@ -13,7 +12,6 @@ export default function PartialScanReview({
   onDone,
 }) {
   const [currentScan, setCurrentScan] = useState(scan);
-  const [recomputing, setRecomputing] = useState(null);
   const [exportError, setExportError] = useState("");
 
   useEffect(() => {
@@ -124,35 +122,6 @@ export default function PartialScanReview({
         </p>
       )}
       <div className="ss-actions">
-        {currentScan.rawCapture && (
-          <button
-            type="button"
-            disabled={Boolean(recomputing)}
-            onClick={async () => {
-              setRecomputing({ stage: "Preparing keyframes…", progress: 2 });
-              setExportError("");
-              try {
-                const refreshed = await reconstructFromRawCapture(
-                  currentScan.rawCapture,
-                  {},
-                  (stage, progress) => setRecomputing({ stage, progress }),
-                );
-                setCurrentScan(refreshed);
-                onUpdateScan?.(refreshed);
-              } catch (reason) {
-                setExportError(
-                  reason.message || "Re-rendering failed.",
-                );
-              } finally {
-                setRecomputing(null);
-              }
-            }}
-          >
-            {recomputing
-              ? `Re-rendering (${Math.round(recomputing.progress || 0)}%)…`
-              : "Re-render with latest engine"}
-          </button>
-        )}
         <button
           type="button"
           onClick={() => {
