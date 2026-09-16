@@ -3167,6 +3167,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
       };
     });
   const planes = [];
+  const constituentOffsets = new Map();
   for (const candidate of rawPlanes) {
     let duplicateOf = null;
     for (const existing of planes) {
@@ -3174,10 +3175,29 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
         candidate.nx * existing.nx +
         candidate.ny * existing.ny +
         candidate.nz * existing.nz;
-      const offsetDiff = Math.abs(candidate.offset - existing.offset);
-      // Merge candidate duplicate sheets: similar normal (within 38 deg) and within 45cm
-      if (Math.abs(dot) >= 0.78 && offsetDiff <= 0.45) {
+      const sign = dot >= 0 ? 1 : -1;
+      const offsetDiff = Math.abs(candidate.offset * sign - existing.offset);
+
+      // Merge candidate duplicate sheets: similar normal, drift offset between 8cm and 45cm,
+      // and substantial area (duplicate wall sheets cover a large fraction of the wall, unlike curtains/decor)
+      const isDuplicateWallSheet =
+        Math.abs(dot) >= 0.78 &&
+        offsetDiff >= 0.08 &&
+        offsetDiff <= 0.45 &&
+        candidate.area >= Math.min(0.6, existing.area * 0.25);
+
+      // Or merge same-surface candidate patches (same normal and offset within 5cm)
+      const isSameWallSurface =
+        Math.abs(dot) >= 0.78 &&
+        offsetDiff < 0.05;
+
+      if (isDuplicateWallSheet || isSameWallSurface) {
         duplicateOf = existing;
+        if (isDuplicateWallSheet) {
+          const offsets = constituentOffsets.get(existing) || [existing.offset];
+          offsets.push(candidate.offset * sign);
+          constituentOffsets.set(existing, offsets);
+        }
         break;
       }
     }
@@ -3192,7 +3212,9 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
         );
       });
       if (!isStepArtifact && planes.length < maxPlanes) {
-        planes.push({ ...candidate });
+        const plane = { ...candidate };
+        planes.push(plane);
+        constituentOffsets.set(plane, [candidate.offset]);
       }
     } else {
       const dot =
@@ -3224,10 +3246,27 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
 
   const positions = new Float32Array(mesh.positions);
   const normals = computeNormals(mesh);
+  const vertexCount = positions.length / 3;
+
+  const adjacency = Array.from({ length: vertexCount }, () => []);
+  for (let index = 0; index < mesh.indices.length; index += 3) {
+    const a = mesh.indices[index];
+    const b = mesh.indices[index + 1];
+    const c = mesh.indices[index + 2];
+    adjacency[a].push(b, c);
+    adjacency[b].push(a, c);
+    adjacency[c].push(a, b);
+  }
+
   const distanceLimit = Math.min(0.38, Math.max(0.20, voxelSize * 8.5));
-  for (let vertex = 0; vertex < positions.length / 3; vertex++) {
+  const drywallTolerance = Math.max(0.015, voxelSize * 0.55);
+
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
     const normalOffset = vertex * 3;
     if (Math.abs(normals[normalOffset + 1]) > 0.45) continue;
+    const neighbors = adjacency[vertex];
+    if (!neighbors || neighbors.length < 2) continue;
+
     let best = null;
     planes.forEach((plane) => {
       const alignment = Math.abs(
@@ -3235,15 +3274,49 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
         normals[normalOffset + 1] * plane.ny +
         normals[normalOffset + 2] * plane.nz,
       );
-      const distance =
+      const vertexPlaneOffset =
         positions[normalOffset] * plane.nx +
         positions[normalOffset + 1] * plane.ny +
-        positions[normalOffset + 2] * plane.nz -
-        plane.offset;
+        positions[normalOffset + 2] * plane.nz;
+      const distance = vertexPlaneOffset - plane.offset;
       if (Math.abs(distance) > distanceLimit) return;
-      // Allow transition seam vertices (whose normals were tilted by step triangles)
-      // to snap to the dominant wall plane if close, preventing permanent creases
-      if (alignment < 0.42 && Math.abs(distance) > 0.18) return;
+
+      // Curtains / drapery check:
+      // Exclude vertices whose immediate neighbors have deviating normals (folds/pleats)
+      let deviatingNeighbors = 0;
+      for (const n of neighbors) {
+        const no = n * 3;
+        const nAlign = Math.abs(
+          normals[no] * plane.nx +
+          normals[no + 1] * plane.ny +
+          normals[no + 2] * plane.nz,
+        );
+        if (nAlign < 0.72) deviatingNeighbors++;
+      }
+      if (deviatingNeighbors > neighbors.length * 0.25) return;
+
+      // Relief preservation: Vertex must be close to one of the constituent
+      // wall sheets of this plane (drywall noise or verified merged duplicate layer).
+      // Floating foreground objects (paintings, wall decor, shelves) that sit
+      // in front of the wall outside this tolerance retain their physical relief.
+      const offsets = constituentOffsets.get(plane) || [plane.offset];
+      const isWallSheet = offsets.some(
+        (sheetOffset) => Math.abs(vertexPlaneOffset - sheetOffset) <= drywallTolerance,
+      );
+
+      // Transition seam vertices: narrow ramp between verified merged duplicate sheets
+      const isTransitionSeam =
+        offsets.length > 1 &&
+        alignment >= 0.42 &&
+        alignment < 0.72 &&
+        Math.abs(distance) <= 0.18;
+
+      if (alignment >= 0.72) {
+        if (!isWallSheet) return;
+      } else if (!isTransitionSeam) {
+        return;
+      }
+
       const score = Math.abs(distance) - alignment * 0.04;
       if (!best || score < best.score) best = { plane, distance, score };
     });
