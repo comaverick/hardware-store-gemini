@@ -1,13 +1,13 @@
 export const SCAN_FILE_FORMAT = "scanspace-scan";
 // Kept so exports created before the unified scan UI continue to open.
 export const PARTIAL_SCAN_FORMAT = "scanspace-partial-surface";
-export const MAX_SCAN_FILE_IMPORT_BYTES = 64 * 1024 * 1024;
+export const MAX_SCAN_FILE_IMPORT_BYTES = 256 * 1024 * 1024;
 export const MAX_PARTIAL_SCAN_IMPORT_BYTES = MAX_SCAN_FILE_IMPORT_BYTES;
 
-const MAX_ARRAY_BYTES = 32 * 1024 * 1024;
+const MAX_ARRAY_BYTES = 128 * 1024 * 1024;
 // Base64 adds about one third to the binary size. Keeping portable mesh data
 // below this threshold leaves ample room for the point cloud and JSON metadata.
-const MAX_PORTABLE_MESH_BYTES = 36 * 1024 * 1024;
+const MAX_PORTABLE_MESH_BYTES = 192 * 1024 * 1024;
 const ARRAY_TYPES = {
   f32: Float32Array,
   u8: Uint8Array,

@@ -4,6 +4,7 @@ import {
   serializePartialScan,
   hasRawCapture,
   extractRawCapture,
+  MAX_SCAN_FILE_IMPORT_BYTES,
 } from "./partialScanFile";
 
 function measuredScan() {
@@ -103,3 +104,8 @@ test("rawCapture survives serialization and is detected by hasRawCapture/extract
   expect(restored.rawCapture).toBeDefined();
   expect(restored.rawCapture.keyframes).toHaveLength(1);
 });
+
+test("MAX_SCAN_FILE_IMPORT_BYTES supports raw scan packages well beyond 64MB", () => {
+  expect(MAX_SCAN_FILE_IMPORT_BYTES).toBeGreaterThanOrEqual(256 * 1024 * 1024);
+});
+

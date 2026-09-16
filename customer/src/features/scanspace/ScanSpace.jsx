@@ -132,12 +132,14 @@ export default function ScanSpace() {
       const limit = scanFile
         ? MAX_SCAN_FILE_IMPORT_BYTES
         : MAX_ROOM_IMPORT_BYTES;
-      if (file.size > limit)
+      if (file.size > limit) {
+        const limitMb = Math.round(limit / (1024 * 1024));
         throw new Error(
           scanFile
-            ? "Scan files can be up to 64 MB."
-            : "Saved room files can be up to 10 MB.",
+            ? `Scan files can be up to ${limitMb} MB.`
+            : `Saved room files can be up to ${limitMb} MB.`,
         );
+      }
       const contents = await file.text();
       const hasRaw = hasRawCapture(contents) || isRawDiagnostics;
       if (hasRaw) {
