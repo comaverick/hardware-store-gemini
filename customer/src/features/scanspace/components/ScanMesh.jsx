@@ -16,11 +16,8 @@ export default function ScanMesh({ mesh, low = false }) {
       {resources.texture ? (
         <meshBasicMaterial vertexColors map={resources.texture}
           side={THREE.DoubleSide} toneMapped={false} />
-      ) : mesh.portableColors ? (
-        <meshBasicMaterial vertexColors side={THREE.DoubleSide} toneMapped={false} />
       ) : (
-        <meshStandardMaterial vertexColors side={THREE.DoubleSide}
-          roughness={0.92} metalness={0} flatShading={low} />
+        <meshBasicMaterial vertexColors side={THREE.DoubleSide} toneMapped={false} />
       )}
     </mesh>
   );
