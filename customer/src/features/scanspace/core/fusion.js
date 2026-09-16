@@ -3205,18 +3205,11 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
       const sign = dot >= 0 ? 1 : -1;
       const offsetDiff = Math.abs(candidate.offset * sign - existing.offset);
 
-      // Merge candidate duplicate sheets: similar normal, drift offset between 8cm and 45cm,
-      // and substantial area (duplicate wall sheets cover a large fraction of the wall, unlike curtains/decor)
-      const isDuplicateWallSheet =
-        Math.abs(dot) >= 0.78 &&
-        offsetDiff >= 0.08 &&
-        offsetDiff <= 0.45 &&
-        candidate.area >= Math.min(0.6, existing.area * 0.25);
-
-      // Or merge same-surface candidate patches (same normal and offset within 5cm)
-      const isSameWallSurface =
-        Math.abs(dot) >= 0.78 &&
-        offsetDiff < 0.05;
+      // Merge candidate duplicate sheets or same-surface patches:
+      // Parallel normal within 38 degrees and within 45cm distance.
+      const isParallelWall = Math.abs(dot) >= 0.78 && offsetDiff <= 0.45;
+      const isDuplicateWallSheet = isParallelWall && offsetDiff >= 0.045;
+      const isSameWallSurface = isParallelWall && offsetDiff < 0.045;
 
       if (isDuplicateWallSheet || isSameWallSurface) {
         duplicateOf = existing;
@@ -3286,7 +3279,7 @@ export function stabilizeDominantWalls(mesh, voxelSize, maxPlanes = 6) {
   }
 
   const distanceLimit = Math.min(0.38, Math.max(0.20, voxelSize * 8.5));
-  const drywallTolerance = Math.max(0.016, voxelSize * 0.58);
+  const drywallTolerance = Math.max(0.024, voxelSize * 0.75);
 
   for (let vertex = 0; vertex < vertexCount; vertex++) {
     const normalOffset = vertex * 3;
@@ -3512,7 +3505,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
 
   samples.sort((left, right) => left.height - right.height);
   const clusters = [];
-  const clusterDistance = Math.max(0.12, voxelSize * 3.5);
+  const clusterDistance = Math.max(0.07, voxelSize * 2.2);
   samples.forEach((sample) => {
     const cluster = clusters[clusters.length - 1];
     if (!cluster || Math.abs(sample.height - cluster.height) > clusterDistance) {
@@ -3553,7 +3546,7 @@ export function stabilizeMeasuredHorizontalSurfaces(
     adjacency[b].add(a); adjacency[b].add(c);
     adjacency[c].add(a); adjacency[c].add(b);
   }
-  const distanceLimit = clamp(voxelSize * 5.0, 0.12, 0.25);
+  const distanceLimit = clamp(voxelSize * 2.5, 0.05, 0.09);
   let stabilizedHorizontalVertexCount = 0;
   for (let vertex = 0; vertex < positions.length / 3; vertex++) {
     const offset = vertex * 3;
@@ -3692,13 +3685,21 @@ export function constrainSurfaceDeformation(mesh, proposed) {
     const correctedArea = Math.hypot(...corrected);
     const alignment = original.reduce((sum, value, axis) => sum + value * corrected[axis], 0);
     // meshTriangleNormal returns an unnormalized cross product.
-    const safe = Number.isFinite(correctedArea) && originalArea > 1e-12 &&
-      correctedArea >= originalArea * 0.4 && correctedArea <= originalArea * 2.5 &&
-      alignment >= originalArea * correctedArea * 0.5;
+    const safe =
+      Number.isFinite(correctedArea) &&
+      (originalArea < 1e-10 ||
+        (correctedArea >= originalArea * 0.08 &&
+          correctedArea <= Math.max(originalArea * 4.0, 0.005) &&
+          alignment >= originalArea * correctedArea * 0.05));
     if (safe) continue;
     for (const vertex of triangle) {
       const offset = vertex * 3;
-      if ([0, 1, 2].every((axis) => positions[offset + axis] === source[offset + axis])) continue;
+      if (
+        positions[offset] === source[offset] &&
+        positions[offset + 1] === source[offset + 1] &&
+        positions[offset + 2] === source[offset + 2]
+      )
+        continue;
       positions.set(source.subarray(offset, offset + 3), offset);
       revertedVertices++;
       adjacency[vertex].forEach((neighbor) => {
@@ -4520,13 +4521,24 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
       let vertexAgreements = vertexDepthProjections.map((projection) =>
         closestProjectiveDepthAgreement(frame, projection, 2),
       );
+      const centerForegroundOccluded =
+        centerAgreement &&
+        centerAgreement.depth <
+          depthProjection.depth -
+            Math.max(0.025, depthProjection.depth * 0.018);
       const centerValid =
         centerAgreement &&
+        !centerForegroundOccluded &&
         centerAgreement.difference <=
           Math.max(0.055, centerAgreement.depth * 0.03);
       const validVertexAgreements = vertexAgreements.filter(
-        (agreement) =>
+        (agreement, i) =>
           agreement &&
+          !(
+            agreement.depth <
+            vertexDepthProjections[i].depth -
+              Math.max(0.025, vertexDepthProjections[i].depth * 0.018)
+          ) &&
           agreement.difference <=
             Math.max(0.065, agreement.depth * 0.035),
       );
@@ -4536,7 +4548,11 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
         // the triangle normal faces the camera, and there is no closer occluder in the frame,
         // allow the camera photo (e.g. wall hanging or artwork) to project across the cavity.
         const centerSample = sampleProjectiveDepth(frame, depthProjection.u, depthProjection.v);
-        const hasForegroundOccluder = centerSample > 0 && centerSample < depthProjection.depth - 0.08;
+        const hasForegroundOccluder =
+          centerSample > 0 &&
+          centerSample <
+            depthProjection.depth -
+              Math.max(0.025, depthProjection.depth * 0.018);
         if (validVertexAgreements.length >= 2 && !hasForegroundOccluder) {
           isRecoveredCavity = true;
           centerAgreement = centerAgreement || {
@@ -4726,7 +4742,9 @@ export function texturedMesh(mesh, frames, precomputedCalibration = null) {
           );
           if (
             centerSample > 0 &&
-            centerSample < depthProjection.depth - 0.12
+            centerSample <
+              depthProjection.depth -
+                Math.max(0.032, depthProjection.depth * 0.025)
           ) {
             return;
           }
