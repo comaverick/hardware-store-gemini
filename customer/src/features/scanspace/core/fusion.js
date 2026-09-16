@@ -1628,20 +1628,23 @@ function integrateProjective(volume, frames, report) {
           }
           if (motionReliability < 0.8)
             volume.motionDownweightedSamples++;
-          // Once an observation establishes a local TSDF value, use a robust
-          // Huber influence curve for later disagreement. This stops a slightly
-          // drifted view from bending a straight wall or melting thin shelves and
-          // bottles, while retaining that view's genuinely new measured area.
-          if (previousWeight > 0.15) {
+          // Once two observations establish a local TSDF value, use a Huber
+          // influence curve for later disagreement. This stops a slightly
+          // drifted view from bending a straight wall or producing a doubled
+          // shelf, while retaining that view's genuinely new measured area.
+          if (volume.viewpointCounts[index] >= 2 && previousWeight > 0.2) {
             const residual = Math.abs(delta);
-            // Reject secondary samples that deviate significantly from established surface
-            // to avoid smearing thin shelf posts, bottles, and decorative edges.
-            if (residual >= 0.52) {
+            // Once independent views establish a local surface, a later TSDF
+            // sample that disagrees by almost a full truncation band is pose
+            // drift or another depth layer, not useful smoothing evidence.
+            // Reject it locally while retaining the frame's genuinely new
+            // regions elsewhere in the volume.
+            if (residual >= 0.82) {
               volume.robustlyRejectedSamples++;
               continue;
             }
-            const robustAgreement = residual > 0.25
-              ? clamp(((0.52 - residual) / 0.27) ** 2, 0.05, 1)
+            const robustAgreement = residual > 0.34
+              ? clamp(((0.82 - residual) / 0.48) ** 2, 0.08, 1)
               : 1;
             if (robustAgreement < 0.999)
               volume.robustlyDownweightedSamples++;
@@ -1811,12 +1814,12 @@ function regularizeVolume(volume) {
               centerValue * 0.84 +
               (agreeing.reduce((sum, value) => sum + value, 0) / agreeing.length) *
                 0.16;
-        } else if (!sourceMeasuredSupport[index] && support >= 5) {
+        } else if (!sourceMeasuredSupport[index] && support >= 4) {
           // Repair only a one-voxel hole enclosed by measured neighbors. This
           // cannot bridge a doorway or a broad unscanned part of the room.
           const compatibleHole =
-            valueSamples.length < 5 ||
-            Math.max(...valueSamples) - Math.min(...valueSamples) <= 0.28;
+            valueSamples.length < 4 ||
+            Math.max(...valueSamples) - Math.min(...valueSamples) <= 0.35;
           if (compatibleHole) {
             volume.values[index] = valueSum / support;
             volume.weights[index] = 1;
@@ -1945,25 +1948,21 @@ function extractSurfaceNet(volume, report, options = {}) {
         const reliable = (corner) => {
           const closeRange = corner.meanDepth < 0.9;
           const derivedHole =
-            corner.measuredSupport < 1 && corner.derivedSupport >= 5;
+            corner.measuredSupport < 1 && corner.derivedSupport >= 4;
           const requiredViews = options.surfaceMode
-            // Close-range phone depth is noisier, but three independent
-            // observations are enough to reject a transient reading. The old
-            // four-view requirement left broad holes when a user captured a
-            // partial wall from only a few translated positions.
             ? (closeRange ? 3 : 2)
-            : (closeRange ? 4 : 2);
+            : (closeRange ? 3 : 2);
           // Partial measured surfaces must not average incompatible depth
           // layers into a smooth-looking but physically bent sheet. The
           // tighter limits are applied only when independent viewpoints exist;
           // uncertain reflective measurements remain open instead.
           const varianceLimit = options.surfaceMode
             ? closeRange
-              ? Math.max(0.028, volume.voxelSize * 0.72)
-              : Math.max(0.05, volume.voxelSize * 1.2)
+              ? Math.max(0.035, volume.voxelSize * 0.9)
+              : Math.max(0.055, volume.voxelSize * 1.3)
             : closeRange
-              ? Math.max(0.032, volume.voxelSize * 0.8)
-              : Math.max(0.055, volume.voxelSize * 1.35);
+              ? Math.max(0.045, volume.voxelSize * 1.2)
+              : Math.max(0.065, volume.voxelSize * 1.5);
           const freeSpaceRatio = corner.measuredSupport >= 2 ? 2.5 : 2.0;
           const freeSpaceMin = corner.measuredSupport >= 2 ? 5 : 4;
           const contradictedByFreeSpace =
@@ -1999,11 +1998,11 @@ function extractSurfaceNet(volume, report, options = {}) {
             const closeRange = corner.meanDepth < 0.9;
             const varianceLimit = options.surfaceMode
               ? closeRange
-                ? Math.max(0.028, volume.voxelSize * 0.72)
-                : Math.max(0.05, volume.voxelSize * 1.2)
+                ? Math.max(0.035, volume.voxelSize * 0.9)
+                : Math.max(0.055, volume.voxelSize * 1.3)
               : closeRange
-                ? Math.max(0.032, volume.voxelSize * 0.8)
-                : Math.max(0.055, volume.voxelSize * 1.35);
+                ? Math.max(0.045, volume.voxelSize * 1.2)
+                : Math.max(0.065, volume.voxelSize * 1.5);
             return corner.viewpoints >= 3 && corner.variance > varianceLimit;
           });
           rejectionCounts[
@@ -2180,9 +2179,9 @@ function removeSmallComponents(mesh) {
       .filter(([root, component]) =>
         component.area >= minimumArea &&
         (root === dominantRoot ||
-          component.area >= dominant.area * 0.12 ||
-          (component.area >= dominant.area * 0.025 &&
-            boundsGap(component, dominant) <= 0.22)),
+          component.area >= dominant.area * 0.04 ||
+          (component.area >= dominant.area * 0.01 &&
+            boundsGap(component, dominant) <= 0.45)),
       )
       .map(([root]) => root),
   );

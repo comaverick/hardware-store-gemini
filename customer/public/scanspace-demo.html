@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScanSpace — Apple Style Product Demo</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+    
+    * {
+      box-sizing: border-box;
+      -webkit-font-smoothing: antialiased;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Plus Jakarta Sans", sans-serif;
+      background-color: #060608;
+      color: #f5f5f7;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+    }
+
+    .apple-glass {
+      background: rgba(18, 18, 22, 0.72);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
+    }
+
+    .glow-cyan {
+      box-shadow: 0 0 30px rgba(0, 240, 180, 0.25);
+    }
+
+    .progress-bar-fill {
+      transition: width 0.08s linear;
+    }
+
+    /* Custom range input */
+    input[type=range] {
+      -webkit-appearance: none;
+      background: rgba(255, 255, 255, 0.15);
+      height: 4px;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 14px;
+      width: 14px;
+      border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-[#060608] text-neutral-100 flex flex-col items-center justify-center min-h-screen p-2 md:p-6">
+
+  <!-- Demo Player Container -->
+  <div class="w-full max-w-5xl apple-glass rounded-3xl overflow-hidden border border-white/10 shadow-2xl flex flex-col">
+    
+    <!-- Top Bar: Apple Style Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-white/5 bg-black/40">
+      <div class="flex items-center gap-3">
+        <div class="flex gap-1.5">
+          <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+          <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
+        </div>
+        <span class="text-xs tracking-widest uppercase font-semibold text-neutral-400 pl-2">Product Keynote Demo</span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          60 FPS Simulation
+        </span>
+        <button id="btnSound" class="px-3 py-1 text-xs font-medium rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-1.5 text-neutral-300">
+          <span id="soundIcon">🔊</span> <span id="soundLabel">Sound On</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Main Canvas Viewport (16:9 Aspect Ratio) -->
+    <div class="relative w-full aspect-[16/9] bg-[#020204] overflow-hidden flex items-center justify-center">
+      <canvas id="demoCanvas" width="1280" height="720" class="w-full h-full object-contain block"></canvas>
+
+      <!-- Center Play Overlay (when paused initially) -->
+      <div id="bigPlayOverlay" class="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center cursor-pointer transition-opacity">
+        <div class="w-20 h-20 rounded-full bg-white/10 border border-white/20 flex items-center justify-center shadow-2xl hover:scale-105 hover:bg-white/20 transition-all text-white pl-1">
+          <svg class="w-8 h-8 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+        <h3 class="mt-4 text-xl font-bold tracking-tight text-white">Watch ScanSpace Demo</h3>
+        <p class="text-xs text-neutral-400 mt-1">Apple-Style Showcase · 42 Seconds · 1080p</p>
+      </div>
+
+      <!-- Recording Badge (Active when exporting) -->
+      <div id="recordingBadge" class="hidden absolute top-4 left-4 px-3 py-1.5 rounded-full bg-red-600/90 text-white text-xs font-semibold flex items-center gap-2 shadow-lg backdrop-blur">
+        <span class="w-2 h-2 rounded-full bg-white animate-ping"></span>
+        <span>RECORDING VIDEO...</span>
+      </div>
+    </div>
+
+    <!-- Chapter Progression Badges -->
+    <div class="grid grid-cols-5 border-t border-white/5 bg-black/30 text-center text-[11px] font-medium">
+      <button onclick="seekToTime(0)" id="chip-0" class="py-2.5 px-1 text-neutral-400 hover:text-white transition-colors border-r border-white/5">01 Intro</button>
+      <button onclick="seekToTime(6)" id="chip-1" class="py-2.5 px-1 text-neutral-400 hover:text-white transition-colors border-r border-white/5">02 LiDAR Scan</button>
+      <button onclick="seekToTime(14)" id="chip-2" class="py-2.5 px-1 text-neutral-400 hover:text-white transition-colors border-r border-white/5">03 3D Mesh</button>
+      <button onclick="seekToTime(18)" id="chip-3" class="py-2.5 px-1 text-neutral-400 hover:text-white transition-colors border-r border-white/5">04 Customize</button>
+      <button onclick="seekToTime(28)" id="chip-4" class="py-2.5 px-1 text-neutral-400 hover:text-white transition-colors">05 Cart & Price</button>
+    </div>
+
+    <!-- Player Controls Bar -->
+    <div class="px-6 py-4 bg-neutral-950/80 border-t border-white/5 flex flex-col gap-3">
+      
+      <!-- Scrubber Bar -->
+      <div class="flex items-center gap-3">
+        <span id="timeCurrent" class="text-xs font-mono text-neutral-400 w-10 text-right">0:00</span>
+        <div class="relative flex-1 group">
+          <input id="timelineSlider" type="range" min="0" max="42" step="0.05" value="0" class="w-full">
+        </div>
+        <span id="timeTotal" class="text-xs font-mono text-neutral-400 w-10">0:42</span>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center justify-between pt-1">
+        <div class="flex items-center gap-3">
+          <!-- Play / Pause -->
+          <button id="btnPlay" class="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center font-bold hover:bg-neutral-200 transition-all shadow-md">
+            <svg id="playIcon" class="w-4 h-4 fill-current ml-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="pauseIcon" class="w-4 h-4 fill-current hidden" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          </button>
+
+          <!-- Restart -->
+          <button onclick="restartDemo()" class="p-2 text-neutral-400 hover:text-white transition-colors rounded-full hover:bg-white/5" title="Restart">
+            <svg class="w-5 h-5 fill-none stroke-current stroke-2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>
+
+          <!-- Speed -->
+          <div class="flex items-center bg-white/5 rounded-lg border border-white/10 p-0.5 text-xs text-neutral-300">
+            <button onclick="setSpeed(1)" id="spd-1" class="px-2.5 py-1 rounded bg-white/20 text-white font-medium">1x</button>
+            <button onclick="setSpeed(1.5)" id="spd-1.5" class="px-2.5 py-1 rounded text-neutral-400 hover:text-white">1.5x</button>
+          </div>
+        </div>
+
+        <!-- Export Video Button -->
+        <button id="btnExport" onclick="recordAndDownload()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-black font-semibold text-xs tracking-tight hover:brightness-110 active:scale-95 transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/20">
+          <svg class="w-4 h-4 fill-none stroke-current stroke-2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span id="exportText">Export Demo Video (.webm)</span>
+        </button>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Keynote Features Overview Card -->
+  <div class="w-full max-w-5xl mt-6 grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="apple-glass rounded-2xl p-4 border border-white/5">
+      <div class="text-xs uppercase tracking-widest text-emerald-400 font-semibold mb-1">01 · Capture</div>
+      <h4 class="text-sm font-bold text-white">LiDAR Depth Fusion</h4>
+      <p class="text-xs text-neutral-400 mt-1">Real-time room bounds, point clouds & depth frames from camera sensors.</p>
+    </div>
+    <div class="apple-glass rounded-2xl p-4 border border-white/5">
+      <div class="text-xs uppercase tracking-widest text-teal-400 font-semibold mb-1">02 · Finishes</div>
+      <h4 class="text-sm font-bold text-white">Paint & Planks</h4>
+      <p class="text-xs text-neutral-400 mt-1">Instant wall paint coating and wood plank flooring at true scale.</p>
+    </div>
+    <div class="apple-glass rounded-2xl p-4 border border-white/5">
+      <div class="text-xs uppercase tracking-widest text-indigo-400 font-semibold mb-1">03 · Space</div>
+      <h4 class="text-sm font-bold text-white">3D Modern Furniture</h4>
+      <p class="text-xs text-neutral-400 mt-1">Snap Scandinavian sofas and tables into place with collision detection.</p>
+    </div>
+    <div class="apple-glass rounded-2xl p-4 border border-white/5">
+      <div class="text-xs uppercase tracking-widest text-amber-400 font-semibold mb-1">04 · Cart</div>
+      <h4 class="text-sm font-bold text-white">Precision Calculation</h4>
+      <p class="text-xs text-neutral-400 mt-1">Openings deducted, waste allowance factored, exact store prices totaled.</p>
+    </div>
+  </div>
+
+  <script>
+    // --- Canvas & Core Timing Engine ---
+    const canvas = document.getElementById("demoCanvas");
+    const ctx = canvas.getContext("2d");
+    const TOTAL_DURATION = 42; // seconds
+    let currentTime = 0;
+    let isPlaying = false;
+    let playbackSpeed = 1;
+    let lastTimestamp = null;
+    let audioEnabled = true;
+
+    // Web Audio Synthesizer for Apple-grade sound effects
+    let audioCtx = null;
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function playSound(type) {
+      if (!audioEnabled || !audioCtx) return;
+      const t = audioCtx.currentTime;
+      
+      if (type === "whoosh") {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(140, t);
+        osc.frequency.exponentialRampToValueAtTime(40, t + 0.35);
+        gain.gain.setValueAtTime(0.2, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.35);
+      } else if (type === "sonar") {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(880, t);
+        osc.frequency.exponentialRampToValueAtTime(1320, t + 0.12);
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.12);
+      } else if (type === "click") {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(500, t);
+        gain.gain.setValueAtTime(0.25, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.04);
+      } else if (type === "snap") {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(180, t);
+        osc.frequency.exponentialRampToValueAtTime(80, t + 0.15);
+        gain.gain.setValueAtTime(0.3, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.15);
+      } else if (type === "ticker") {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(900, t);
+        gain.gain.setValueAtTime(0.08, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.02);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.02);
+      } else if (type === "success") {
+        [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(freq, t + i * 0.06);
+          gain.gain.setValueAtTime(0.18, t + i * 0.06);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.06 + 0.4);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t + i * 0.06);
+          osc.stop(t + i * 0.06 + 0.4);
+        });
+      }
+    }
+
+    // Audio cue trigger tracker so sounds only fire once per milestone
+    const soundMilestones = {
+      0.1: () => playSound("whoosh"),
+      6.2: () => playSound("sonar"),
+      8.5: () => playSound("sonar"),
+      11.0: () => playSound("sonar"),
+      14.0: () => playSound("snap"),
+      18.5: () => playSound("click"), // paint
+      22.0: () => playSound("click"), // floor
+      24.5: () => playSound("snap"),  // sofa
+      26.5: () => playSound("snap"),  // table
+      28.5: () => playSound("whoosh"),
+      30.0: () => playSound("ticker"),
+      31.0: () => playSound("ticker"),
+      32.0: () => playSound("ticker"),
+      35.5: () => playSound("success"), // cart reserve
+      38.0: () => playSound("whoosh")
+    };
+    let firedMilestones = new Set();
+
+    // 3D Isometric / Axonometric Math
+    function project3D(x, y, z, originX = 640, originY = 400, scale = 45, yaw = -0.55, pitch = 0.45) {
+      // Rotation around Y axis
+      const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+      const x1 = x * cosY - z * sinY;
+      const z1 = x * sinY + z * cosY;
+
+      // Rotation around X axis
+      const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
+      const y2 = y * cosX - z1 * sinX;
+      const z2 = y * sinX + z1 * cosX;
+
+      // Perspective projection
+      const fov = 800;
+      const depth = fov / (fov + z2 * 15);
+      return {
+        x: originX + x1 * scale * depth,
+        y: originY - y2 * scale * depth,
+        depth: z2
+      };
+    }
+
+    // --- Particle Simulation for LiDAR Point Cloud ---
+    const lidarPoints = [];
+    for (let i = 0; i < 280; i++) {
+      // Points distributed across walls and floor
+      const isFloor = Math.random() < 0.45;
+      if (isFloor) {
+        lidarPoints.push({
+          x: (Math.random() - 0.5) * 7.5,
+          y: 0,
+          z: (Math.random() - 0.5) * 5.5,
+          color: Math.random() > 0.3 ? "#00f0b4" : "#00b4d8",
+          delay: Math.random() * 5.0
+        });
+      } else {
+        const wallIdx = Math.floor(Math.random() * 2);
+        if (wallIdx === 0) {
+          lidarPoints.push({
+            x: -3.75,
+            y: Math.random() * 3.2,
+            z: (Math.random() - 0.5) * 5.5,
+            color: Math.random() > 0.3 ? "#00f0b4" : "#48cae4",
+            delay: Math.random() * 5.0
+          });
+        } else {
+          lidarPoints.push({
+            x: (Math.random() - 0.5) * 7.5,
+            y: Math.random() * 3.2,
+            z: -2.75,
+            color: Math.random() > 0.3 ? "#00f0b4" : "#48cae4",
+            delay: Math.random() * 5.0
+          });
+        }
+      }
+    }
+
+    // --- Main Render Frame Loop ---
+    function render(t) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Background Studio Gradient
+      const bgGrad = ctx.createRadialGradient(640, 360, 50, 640, 360, 750);
+      bgGrad.addColorStop(0, "#0e1017");
+      bgGrad.addColorStop(1, "#030406");
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Check audio milestones
+      for (const [key, fn] of Object.entries(soundMilestones)) {
+        const mTime = parseFloat(key);
+        if (t >= mTime && !firedMilestones.has(key) && isPlaying) {
+          firedMilestones.add(key);
+          fn();
+        }
+      }
+
+      // Dynamic Camera Parameters based on timeline
+      let yaw = -0.65 + Math.sin(t * 0.25) * 0.08;
+      let pitch = 0.42 + Math.cos(t * 0.2) * 0.04;
+      let originX = 640;
+      let originY = 430;
+      let scale = 44;
+
+      // In scene 5 (Cart), shift camera left to make room for Apple Cart sheet
+      if (t >= 28 && t < 38) {
+        const cartSlide = Math.min(1, (t - 28) / 1.2);
+        const smoothSlide = cartSlide * cartSlide * (3 - 2 * cartSlide);
+        originX = 640 - 240 * smoothSlide;
+        originY = 440;
+        scale = 36;
+      } else if (t >= 38) {
+        const outroT = Math.min(1, (t - 38) / 1.5);
+        originX = 640;
+        originY = 410;
+        scale = 44 + outroT * 4;
+        yaw += outroT * 0.2;
+      }
+
+      // -------------------------------------------------------------
+      // 01. SCENE: INTRO HOOK (0:00 - 0:06)
+      // -------------------------------------------------------------
+      if (t < 6) {
+        const introAlpha = Math.min(1, t / 1.2);
+        const textFadeOut = t > 4.5 ? Math.max(0, 1 - (t - 4.5) / 1.5) : 1;
+
+        // Subtle wireframe room preview
+        drawRoomWireframe(originX, originY, scale * 0.9, yaw, pitch, 0.35 * introAlpha);
+
+        // Apple Hero Title Card
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.globalAlpha = introAlpha * textFadeOut;
+
+        // Kicker
+        ctx.font = "600 13px -apple-system, sans-serif";
+        ctx.fillStyle = "#00f0b4";
+        ctx.letterSpacing = "3px";
+        ctx.fillText("INTRODUCING SCANSPACE", 640, 260);
+
+        // Main Headline
+        ctx.font = "800 52px -apple-system, sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.letterSpacing = "-1.5px";
+        ctx.fillText("Your room. Measured & priced.", 640, 320);
+
+        // Subtitle
+        ctx.font = "400 20px -apple-system, sans-serif";
+        ctx.fillStyle = "#8e8e93";
+        ctx.fillText("From physical LiDAR scan to exact hardware store cart.", 640, 360);
+
+        // Floating Badges
+        ctx.font = "500 13px -apple-system, sans-serif";
+        ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.fillText("LiDAR Depth · Real-Scale Paint & Planks · Instant Hardware Reservation", 640, 480);
+        ctx.restore();
+      }
+
+      // -------------------------------------------------------------
+      // 02. SCENE: LIDAR SCANNING PROCESS (0:06 - 0:14)
+      // -------------------------------------------------------------
+      if (t >= 5.5 && t < 14.5) {
+        const scanT = t - 6;
+        const scanProgress = Math.max(0, Math.min(1, scanT / 7.5));
+        
+        // Render 3D floor boundary grid
+        drawScanGrid(originX, originY, scale, yaw, pitch, scanProgress);
+
+        // Draw animated laser scanning beam sweeping across room
+        const sweepZ = -2.5 + 5.0 * ((scanT * 0.6) % 1.0);
+        drawLaserSweep(originX, originY, scale, yaw, pitch, sweepZ);
+
+        // Render shimmering LiDAR Depth Point Cloud
+        drawLidarPoints(originX, originY, scale, yaw, pitch, scanT);
+
+        // Apple HUD Overlays
+        drawLidarHUD(scanProgress);
+      }
+
+      // -------------------------------------------------------------
+      // 03. SCENE: 3D SOLID MESH FORMATION (0:14 - 0:18)
+      // -------------------------------------------------------------
+      if (t >= 14 && t < 18.5) {
+        const meshT = (t - 14) / 4.0;
+        drawSolidRoom(originX, originY, scale, yaw, pitch, {
+          paintWall1: "#eee8dd",
+          paintWall2: "#eee8dd",
+          floorFinish: "concrete",
+          showFurniture: false,
+          transitionAlpha: Math.min(1, meshT * 2)
+        });
+
+        // Floating pill
+        drawFloatingPill(640, 160, "SPATIAL RECONSTRUCTION", "3D Room Mesh Formed · 4.8m × 3.6m · 2.7m Ceiling", "#00f0b4");
+      }
+
+      // -------------------------------------------------------------
+      // 04. SCENE: CUSTOMIZATION (0:18 - 0:28)
+      // -------------------------------------------------------------
+      if (t >= 18 && t < 28.5) {
+        const customT = t - 18;
+        
+        // Wall 1 recolors to Sage Green at 18.5s
+        const wall1Color = customT > 1.0 ? "#a0afa4" : "#eee8dd";
+        // Floor switches to Oak Planks at 21.5s
+        const floorFinish = customT > 3.5 ? "wood" : "concrete";
+        // Sofa drops at 24.5s
+        const showSofa = customT > 6.0;
+        // Coffee table drops at 26.5s
+        const showTable = customT > 8.0;
+
+        drawSolidRoom(originX, originY, scale, yaw, pitch, {
+          paintWall1: wall1Color,
+          paintWall2: wall1Color,
+          floorFinish: floorFinish,
+          showFurniture: true,
+          showSofa: showSofa,
+          showTable: showTable,
+          furnitureAnimT: customT
+        });
+
+        // Contextual Feature Calls
+        if (customT < 3.5) {
+          drawFloatingPill(500, 180, "WALL CUSTOMIZATION", "Sample Sage Paint · 2 Coats · Washable Matte", "#a0afa4");
+        } else if (customT < 6.0) {
+          drawFloatingPill(640, 180, "FLOOR FINISH", "Natural Oak Flooring · Plank Width 0.22m · Grain Angle 45°", "#d4a373");
+        } else {
+          drawFloatingPill(640, 180, "REAL-SCALE 3D OBJECTS", "Collision-Aware Snap-to-Grid Placement", "#60a5fa");
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 05. SCENE: SMART CART & CALCULATION (0:28 - 0:38)
+      // -------------------------------------------------------------
+      if (t >= 28 && t < 38) {
+        const cartT = t - 28;
+        
+        // Draw the 3D room on the left
+        drawSolidRoom(originX, originY, scale, yaw, pitch, {
+          paintWall1: "#a0afa4",
+          paintWall2: "#a0afa4",
+          floorFinish: "wood",
+          showFurniture: true,
+          showSofa: true,
+          showTable: true
+        });
+
+        // Draw the Apple-style Cart & Calculation Sheet on the right
+        drawAppleCartSheet(cartT);
+      }
+
+      // -------------------------------------------------------------
+      // 06. SCENE: OUTRO LOCKUP (0:38 - 0:42)
+      // -------------------------------------------------------------
+      if (t >= 38) {
+        const outroT = t - 38;
+        const outroAlpha = Math.min(1, outroT / 1.0);
+
+        drawSolidRoom(originX, originY, scale, yaw, pitch, {
+          paintWall1: "#a0afa4",
+          paintWall2: "#a0afa4",
+          floorFinish: "wood",
+          showFurniture: true,
+          showSofa: true,
+          showTable: true
+        });
+
+        // Subtle dark scrim
+        ctx.fillStyle = `rgba(3, 4, 6, ${0.75 * outroAlpha})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Apple Outro Title
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.globalAlpha = outroAlpha;
+
+        ctx.font = "800 64px -apple-system, sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.letterSpacing = "-2px";
+        ctx.fillText("ScanSpace.", 640, 330);
+
+        ctx.font = "400 22px -apple-system, sans-serif";
+        ctx.fillStyle = "#9ca3af";
+        ctx.fillText("From scan to store. Measured, customized, reserved.", 640, 380);
+
+        ctx.font = "600 13px -apple-system, sans-serif";
+        ctx.fillStyle = "#00f0b4";
+        ctx.letterSpacing = "2px";
+        ctx.fillText("AVAILABLE ON WEBXR & STORE TERMINALS", 640, 440);
+        ctx.restore();
+      }
+
+      // Progress bar highlight on chapters
+      updateChapterChips(t);
+    }
+
+    // --- 3D Geometric Drawing Routines ---
+    function drawRoomWireframe(ox, oy, s, yaw, pitch, alpha) {
+      ctx.save();
+      ctx.strokeStyle = `rgba(0, 240, 180, ${alpha})`;
+      ctx.lineWidth = 1.5;
+
+      const corners = [
+        [-3.8, 0, -2.7], [3.8, 0, -2.7],
+        [3.8, 0, 2.7], [-3.8, 0, 2.7]
+      ];
+      const p = corners.map(c => project3D(c[0], c[1], c[2], ox, oy, s, yaw, pitch));
+
+      ctx.beginPath();
+      p.forEach((pt, i) => {
+        if (i === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
+
+      // Wall columns
+      corners.forEach(c => {
+        const b = project3D(c[0], 0, c[2], ox, oy, s, yaw, pitch);
+        const top = project3D(c[0], 2.8, c[2], ox, oy, s, yaw, pitch);
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(top.x, top.y);
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    function drawScanGrid(ox, oy, s, yaw, pitch, progress) {
+      ctx.save();
+      ctx.lineWidth = 1;
+
+      // Floor grid lines
+      for (let x = -3.5; x <= 3.5; x += 0.7) {
+        const p1 = project3D(x, 0, -2.7, ox, oy, s, yaw, pitch);
+        const p2 = project3D(x, 0, 2.7 * progress, ox, oy, s, yaw, pitch);
+        ctx.strokeStyle = "rgba(0, 240, 180, 0.2)";
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+      for (let z = -2.7; z <= 2.7 * progress; z += 0.7) {
+        const p1 = project3D(-3.5, 0, z, ox, oy, s, yaw, pitch);
+        const p2 = project3D(3.5, 0, z, ox, oy, s, yaw, pitch);
+        ctx.strokeStyle = "rgba(0, 240, 180, 0.2)";
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawLaserSweep(ox, oy, s, yaw, pitch, z) {
+      const p1 = project3D(-3.8, 0, z, ox, oy, s, yaw, pitch);
+      const p2 = project3D(3.8, 0, z, ox, oy, s, yaw, pitch);
+
+      ctx.save();
+      ctx.strokeStyle = "#00f0b4";
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = "#00f0b4";
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawLidarPoints(ox, oy, s, yaw, pitch, scanT) {
+      ctx.save();
+      lidarPoints.forEach(pt => {
+        if (scanT < pt.delay) return;
+        const proj = project3D(pt.x, pt.y, pt.z, ox, oy, s, yaw, pitch);
+        const pulse = 0.5 + 0.5 * Math.sin(scanT * 4 + pt.x);
+
+        ctx.fillStyle = pt.color;
+        ctx.globalAlpha = 0.75 * pulse;
+        ctx.beginPath();
+        ctx.arc(proj.x, proj.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    function drawLidarHUD(progress) {
+      ctx.save();
+      // Top Left Pill
+      ctx.fillStyle = "rgba(18, 20, 28, 0.85)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+      ctx.lineWidth = 1;
+      roundRect(ctx, 40, 40, 280, 80, 16);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = "600 11px -apple-system, sans-serif";
+      ctx.fillStyle = "#00f0b4";
+      ctx.letterSpacing = "1.5px";
+      ctx.fillText("DEPTH SENSOR ACTIVE", 60, 68);
+
+      ctx.font = "700 18px -apple-system, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.letterSpacing = "-0.5px";
+      ctx.fillText(`Scanning Room · ${Math.round(progress * 100)}%`, 60, 95);
+
+      // Top Right Compass
+      ctx.fillStyle = "rgba(18, 20, 28, 0.85)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+      roundRect(ctx, 1100, 40, 140, 80, 16);
+      ctx.fill();
+      ctx.stroke();
+
+      // 24 Sector Coverage Dial
+      const cx = 1170, cy = 80, radius = 24;
+      const sectors = 24;
+      const activeSectors = Math.floor(progress * sectors);
+      for (let i = 0; i < sectors; i++) {
+        const angle = (i * 2 * Math.PI) / sectors - Math.PI / 2;
+        const ax = cx + Math.cos(angle) * radius;
+        const ay = cy + Math.sin(angle) * radius;
+        ctx.fillStyle = i <= activeSectors ? "#00f0b4" : "rgba(255, 255, 255, 0.15)";
+        ctx.beginPath();
+        ctx.arc(ax, ay, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawSolidRoom(ox, oy, s, yaw, pitch, opts) {
+      ctx.save();
+      const {
+        paintWall1 = "#eee8dd",
+        paintWall2 = "#eee8dd",
+        floorFinish = "wood",
+        showFurniture = false,
+        showSofa = false,
+        showTable = false,
+        furnitureAnimT = 0,
+        transitionAlpha = 1
+      } = opts;
+
+      ctx.globalAlpha = transitionAlpha;
+
+      // 1. FLOOR POLYGON
+      const f1 = project3D(-3.8, 0, -2.7, ox, oy, s, yaw, pitch);
+      const f2 = project3D(3.8, 0, -2.7, ox, oy, s, yaw, pitch);
+      const f3 = project3D(3.8, 0, 2.7, ox, oy, s, yaw, pitch);
+      const f4 = project3D(-3.8, 0, 2.7, ox, oy, s, yaw, pitch);
+
+      ctx.beginPath();
+      ctx.moveTo(f1.x, f1.y);
+      ctx.lineTo(f2.x, f2.y);
+      ctx.lineTo(f3.x, f3.y);
+      ctx.lineTo(f4.x, f4.y);
+      ctx.closePath();
+
+      if (floorFinish === "wood") {
+        ctx.fillStyle = "#b89772";
+        ctx.fill();
+
+        // Oak plank lines
+        ctx.strokeStyle = "rgba(70, 48, 25, 0.35)";
+        ctx.lineWidth = 1;
+        for (let x = -3.8; x <= 3.8; x += 0.45) {
+          const pStart = project3D(x, 0, -2.7, ox, oy, s, yaw, pitch);
+          const pEnd = project3D(x, 0, 2.7, ox, oy, s, yaw, pitch);
+          ctx.beginPath();
+          ctx.moveTo(pStart.x, pStart.y);
+          ctx.lineTo(pEnd.x, pEnd.y);
+          ctx.stroke();
+        }
+      } else {
+        ctx.fillStyle = "#2c2f38";
+        ctx.fill();
+      }
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // 2. BACK WALL (Z = -2.7)
+      const wB1 = project3D(-3.8, 0, -2.7, ox, oy, s, yaw, pitch);
+      const wB2 = project3D(3.8, 0, -2.7, ox, oy, s, yaw, pitch);
+      const wBT2 = project3D(3.8, 2.8, -2.7, ox, oy, s, yaw, pitch);
+      const wBT1 = project3D(-3.8, 2.8, -2.7, ox, oy, s, yaw, pitch);
+
+      ctx.beginPath();
+      ctx.moveTo(wB1.x, wB1.y);
+      ctx.lineTo(wB2.x, wB2.y);
+      ctx.lineTo(wBT2.x, wBT2.y);
+      ctx.lineTo(wBT1.x, wBT1.y);
+      ctx.closePath();
+      ctx.fillStyle = paintWall1;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.15)";
+      ctx.stroke();
+
+      // Window Cutout on Back Wall
+      const win1 = project3D(0.8, 1.0, -2.69, ox, oy, s, yaw, pitch);
+      const win2 = project3D(2.6, 1.0, -2.69, ox, oy, s, yaw, pitch);
+      const win3 = project3D(2.6, 2.3, -2.69, ox, oy, s, yaw, pitch);
+      const win4 = project3D(0.8, 2.3, -2.69, ox, oy, s, yaw, pitch);
+      ctx.beginPath();
+      ctx.moveTo(win1.x, win1.y);
+      ctx.lineTo(win2.x, win2.y);
+      ctx.lineTo(win3.x, win3.y);
+      ctx.lineTo(win4.x, win4.y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(180, 220, 255, 0.25)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // 3. LEFT WALL (X = -3.8)
+      const wL1 = project3D(-3.8, 0, -2.7, ox, oy, s, yaw, pitch);
+      const wL2 = project3D(-3.8, 0, 2.7, ox, oy, s, yaw, pitch);
+      const wLT2 = project3D(-3.8, 2.8, 2.7, ox, oy, s, yaw, pitch);
+      const wLT1 = project3D(-3.8, 2.8, -2.7, ox, oy, s, yaw, pitch);
+
+      ctx.beginPath();
+      ctx.moveTo(wL1.x, wL1.y);
+      ctx.lineTo(wL2.x, wL2.y);
+      ctx.lineTo(wLT2.x, wLT2.y);
+      ctx.lineTo(wLT1.x, wLT1.y);
+      ctx.closePath();
+      // Shade left wall slightly for depth
+      ctx.fillStyle = shadeColor(paintWall2, -15);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.2)";
+      ctx.stroke();
+
+      // Door Cutout on Left Wall
+      const d1 = project3D(-3.79, 0, -0.5, ox, oy, s, yaw, pitch);
+      const d2 = project3D(-3.79, 0, 0.7, ox, oy, s, yaw, pitch);
+      const d3 = project3D(-3.79, 2.1, 0.7, ox, oy, s, yaw, pitch);
+      const d4 = project3D(-3.79, 2.1, -0.5, ox, oy, s, yaw, pitch);
+      ctx.beginPath();
+      ctx.moveTo(d1.x, d1.y);
+      ctx.lineTo(d2.x, d2.y);
+      ctx.lineTo(d3.x, d3.y);
+      ctx.lineTo(d4.x, d4.y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(10, 10, 14, 0.7)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+      ctx.stroke();
+
+      // 4. FURNITURE (3D Sofa & Table)
+      if (showFurniture) {
+        if (showSofa) {
+          draw3DSofa(ox, oy, s, yaw, pitch, 0, 0, -0.6);
+        }
+        if (showTable) {
+          draw3DTable(ox, oy, s, yaw, pitch, 0, 0, 0.7);
+        }
+      }
+
+      ctx.restore();
+    }
+
+    function draw3DSofa(ox, oy, s, yaw, pitch, sx, sy, sz) {
+      // Soft contact shadow
+      const sh1 = project3D(sx - 1.25, 0.01, sz - 0.55, ox, oy, s, yaw, pitch);
+      const sh2 = project3D(sx + 1.25, 0.01, sz - 0.55, ox, oy, s, yaw, pitch);
+      const sh3 = project3D(sx + 1.25, 0.01, sz + 0.55, ox, oy, s, yaw, pitch);
+      const sh4 = project3D(sx - 1.25, 0.01, sz + 0.55, ox, oy, s, yaw, pitch);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(sh1.x, sh1.y);
+      ctx.lineTo(sh2.x, sh2.y);
+      ctx.lineTo(sh3.x, sh3.y);
+      ctx.lineTo(sh4.x, sh4.y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.fill();
+
+      // Sofa base box
+      draw3DBox(ox, oy, s, yaw, pitch, sx, sy + 0.35, sz, 2.3, 0.45, 0.9, "#b97550", "#9e5f3c");
+      // Sofa backrest
+      draw3DBox(ox, oy, s, yaw, pitch, sx, sy + 0.75, sz - 0.35, 2.3, 0.45, 0.25, "#c28462", "#aa6f4f");
+      ctx.restore();
+    }
+
+    function draw3DTable(ox, oy, s, yaw, pitch, tx, ty, tz) {
+      // Table shadow
+      const sh1 = project3D(tx - 0.65, 0.01, tz - 0.35, ox, oy, s, yaw, pitch);
+      const sh2 = project3D(tx + 0.65, 0.01, tz - 0.35, ox, oy, s, yaw, pitch);
+      const sh3 = project3D(tx + 0.65, 0.01, tz + 0.35, ox, oy, s, yaw, pitch);
+      const sh4 = project3D(tx - 0.65, 0.01, tz + 0.35, ox, oy, s, yaw, pitch);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(sh1.x, sh1.y);
+      ctx.lineTo(sh2.x, sh2.y);
+      ctx.lineTo(sh3.x, sh3.y);
+      ctx.lineTo(sh4.x, sh4.y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+      ctx.fill();
+
+      // Tabletop box
+      draw3DBox(ox, oy, s, yaw, pitch, tx, ty + 0.4, tz, 1.2, 0.08, 0.6, "#d4a373", "#b38255");
+      ctx.restore();
+    }
+
+    function draw3DBox(ox, oy, s, yaw, pitch, cx, cy, cz, w, h, d, topColor, sideColor) {
+      const hw = w / 2, hh = h / 2, hd = d / 2;
+      // Top face
+      const t1 = project3D(cx - hw, cy + hh, cz - hd, ox, oy, s, yaw, pitch);
+      const t2 = project3D(cx + hw, cy + hh, cz - hd, ox, oy, s, yaw, pitch);
+      const t3 = project3D(cx + hw, cy + hh, cz + hd, ox, oy, s, yaw, pitch);
+      const t4 = project3D(cx - hw, cy + hh, cz + hd, ox, oy, s, yaw, pitch);
+
+      ctx.beginPath();
+      ctx.moveTo(t1.x, t1.y);
+      ctx.lineTo(t2.x, t2.y);
+      ctx.lineTo(t3.x, t3.y);
+      ctx.lineTo(t4.x, t4.y);
+      ctx.closePath();
+      ctx.fillStyle = topColor;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.15)";
+      ctx.stroke();
+
+      // Front face
+      const b3 = project3D(cx + hw, cy - hh, cz + hd, ox, oy, s, yaw, pitch);
+      const b4 = project3D(cx - hw, cy - hh, cz + hd, ox, oy, s, yaw, pitch);
+
+      ctx.beginPath();
+      ctx.moveTo(t4.x, t4.y);
+      ctx.lineTo(t3.x, t3.y);
+      ctx.lineTo(b3.x, b3.y);
+      ctx.lineTo(b4.x, b4.y);
+      ctx.closePath();
+      ctx.fillStyle = sideColor;
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // --- Apple-Grade Cart & Calculation Panel ---
+    function drawAppleCartSheet(cartT) {
+      ctx.save();
+      const slideIn = Math.min(1, cartT / 1.0);
+      const smoothSlide = slideIn * slideIn * (3 - 2 * slideIn);
+      const panelX = 1280 - 450 * smoothSlide;
+      const panelY = 50;
+      const panelW = 410;
+      const panelH = 620;
+
+      // Apple Glassmorphic Card
+      ctx.fillStyle = "rgba(18, 20, 28, 0.92)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+      ctx.lineWidth = 1;
+      roundRect(ctx, panelX, panelY, panelW, panelH, 24);
+      ctx.fill();
+      ctx.stroke();
+
+      // Header
+      ctx.font = "600 12px -apple-system, sans-serif";
+      ctx.fillStyle = "#00f0b4";
+      ctx.letterSpacing = "1.5px";
+      ctx.fillText("SMART MATERIAL ESTIMATE", panelX + 32, panelY + 45);
+
+      ctx.font = "700 24px -apple-system, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.letterSpacing = "-0.5px";
+      ctx.fillText("From Room to Cart", panelX + 32, panelY + 75);
+
+      // Line Items
+      const items = [
+        {
+          title: "Sample Sage Paint · 6 L",
+          desc: "Gross 42.5 m² − 4.2 m² openings = 38.3 m² net",
+          price: "₱2,030.00",
+          delay: 0.8
+        },
+        {
+          title: "Sample Oak Flooring · 11 Boxes",
+          desc: "22.4 m² floor + 10% cutting allowance",
+          price: "₱17,600.00",
+          delay: 1.6
+        },
+        {
+          title: "Scandinavian Sofa & Oak Table",
+          desc: "2 pieces · Verified room clearance",
+          price: "₱15,390.00",
+          delay: 2.4
+        }
+      ];
+
+      items.forEach((item, idx) => {
+        if (cartT < item.delay) return;
+        const itemY = panelY + 130 + idx * 80;
+        const itemAlpha = Math.min(1, (cartT - item.delay) / 0.5);
+
+        ctx.save();
+        ctx.globalAlpha = itemAlpha;
+
+        ctx.font = "600 14px -apple-system, sans-serif";
+        ctx.fillStyle = "#f3f4f6";
+        ctx.fillText(item.title, panelX + 32, itemY);
+
+        ctx.font = "400 11px -apple-system, sans-serif";
+        ctx.fillStyle = "#9ca3af";
+        ctx.fillText(item.desc, panelX + 32, itemY + 18);
+
+        ctx.font = "700 14px -apple-system, sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "right";
+        ctx.fillText(item.price, panelX + panelW - 32, itemY);
+
+        // Divider
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+        ctx.beginPath();
+        ctx.moveTo(panelX + 32, itemY + 34);
+        ctx.lineTo(panelX + panelW - 32, itemY + 34);
+        ctx.stroke();
+
+        ctx.restore();
+      });
+
+      // Price Ticker Odometer Rollup
+      if (cartT >= 3.0) {
+        const totalProgress = Math.min(1, (cartT - 3.0) / 2.0);
+        const targetTotal = 35020;
+        const currentTotal = Math.round(targetTotal * totalProgress);
+
+        const totalY = panelY + 410;
+        ctx.font = "500 12px -apple-system, sans-serif";
+        ctx.fillStyle = "#9ca3af";
+        ctx.fillText("Total Estimated Materials", panelX + 32, totalY);
+
+        ctx.font = "800 36px -apple-system, sans-serif";
+        ctx.fillStyle = "#00f0b4";
+        ctx.letterSpacing = "-1px";
+        ctx.fillText(`₱${currentTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, panelX + 32, totalY + 42);
+      }
+
+      // Add to Cart Button (pulsing green)
+      if (cartT >= 5.0) {
+        const btnY = panelY + 520;
+        const btnW = panelW - 64;
+        const btnH = 50;
+
+        ctx.fillStyle = "#00f0b4";
+        roundRect(ctx, panelX + 32, btnY, btnW, btnH, 14);
+        ctx.fill();
+
+        ctx.font = "700 15px -apple-system, sans-serif";
+        ctx.fillStyle = "#000000";
+        ctx.textAlign = "center";
+        ctx.fillText("✓ Reserved for Hardware Pickup", panelX + 32 + btnW / 2, btnY + 31);
+      }
+
+      ctx.restore();
+    }
+
+    function drawFloatingPill(x, y, tag, text, accent) {
+      ctx.save();
+      ctx.textAlign = "center";
+      
+      const width = ctx.measureText(text).width + 60;
+      const height = 48;
+
+      ctx.fillStyle = "rgba(18, 20, 28, 0.85)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+      roundRect(ctx, x - width / 2, y, width, height, 16);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = "600 10px -apple-system, sans-serif";
+      ctx.fillStyle = accent;
+      ctx.letterSpacing = "1.5px";
+      ctx.fillText(tag, x, y + 18);
+
+      ctx.font = "600 13px -apple-system, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(text, x, y + 36);
+
+      ctx.restore();
+    }
+
+    // Utility Helpers
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    function shadeColor(color, percent) {
+      if (!color.startsWith('#')) return color;
+      let num = parseInt(color.slice(1), 16),
+        amt = Math.round(2.55 * percent),
+        R = (num >> 16) + amt,
+        G = (num >> 8 & 0x00FF) + amt,
+        B = (num & 0x0000FF) + amt;
+      return "#" + (0x1000000 + (R<255?R<1?0:R:255)*0x10000 + (G<255?G<1?0:G:255)*0x100 + (B<255?B<1?0:B:255)).toString(16).slice(1);
+    }
+
+    function formatTime(s) {
+      const mins = Math.floor(s / 60);
+      const secs = Math.floor(s % 60);
+      return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    }
+
+    function updateChapterChips(t) {
+      const chips = [
+        { id: "chip-0", start: 0, end: 6 },
+        { id: "chip-1", start: 6, end: 14 },
+        { id: "chip-2", start: 14, end: 18 },
+        { id: "chip-3", start: 18, end: 28 },
+        { id: "chip-4", start: 28, end: 42 },
+      ];
+      chips.forEach(c => {
+        const el = document.getElementById(c.id);
+        if (t >= c.start && t < c.end) {
+          el.className = "py-2.5 px-1 bg-white/10 text-white font-semibold transition-colors border-r border-white/5";
+        } else {
+          el.className = "py-2.5 px-1 text-neutral-400 hover:text-white transition-colors border-r border-white/5";
+        }
+      });
+    }
+
+    // --- Animation Frame Loop ---
+    function loop(timestamp) {
+      if (!lastTimestamp) lastTimestamp = timestamp;
+      const delta = (timestamp - lastTimestamp) / 1000;
+      lastTimestamp = timestamp;
+
+      if (isPlaying) {
+        currentTime += delta * playbackSpeed;
+        if (currentTime >= TOTAL_DURATION) {
+          currentTime = TOTAL_DURATION;
+          pause();
+        }
+        document.getElementById("timelineSlider").value = currentTime;
+        document.getElementById("timeCurrent").innerText = formatTime(currentTime);
+      }
+
+      render(currentTime);
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // --- Playback Controls ---
+    function play() {
+      initAudio();
+      isPlaying = true;
+      document.getElementById("playIcon").classList.add("hidden");
+      document.getElementById("pauseIcon").classList.remove("hidden");
+      document.getElementById("bigPlayOverlay").classList.add("opacity-0", "pointer-events-none");
+    }
+
+    function pause() {
+      isPlaying = false;
+      document.getElementById("playIcon").classList.remove("hidden");
+      document.getElementById("pauseIcon").classList.add("hidden");
+    }
+
+    function togglePlay() {
+      if (isPlaying) pause();
+      else {
+        if (currentTime >= TOTAL_DURATION) restartDemo();
+        play();
+      }
+    }
+
+    function restartDemo() {
+      currentTime = 0;
+      firedMilestones.clear();
+      document.getElementById("timelineSlider").value = 0;
+      document.getElementById("timeCurrent").innerText = "0:00";
+      play();
+    }
+
+    function seekToTime(t) {
+      currentTime = t;
+      // Re-enable upcoming sound milestones
+      for (const key of firedMilestones) {
+        if (parseFloat(key) >= t) firedMilestones.delete(key);
+      }
+      document.getElementById("timelineSlider").value = t;
+      document.getElementById("timeCurrent").innerText = formatTime(t);
+      render(t);
+    }
+
+    function setSpeed(spd) {
+      playbackSpeed = spd;
+      document.getElementById("spd-1").className = spd === 1 ? "px-2.5 py-1 rounded bg-white/20 text-white font-medium" : "px-2.5 py-1 rounded text-neutral-400 hover:text-white";
+      document.getElementById("spd-1.5").className = spd === 1.5 ? "px-2.5 py-1 rounded bg-white/20 text-white font-medium" : "px-2.5 py-1 rounded text-neutral-400 hover:text-white";
+    }
+
+    // --- Event Listeners ---
+    document.getElementById("btnPlay").addEventListener("click", togglePlay);
+    document.getElementById("bigPlayOverlay").addEventListener("click", togglePlay);
+    document.getElementById("timelineSlider").addEventListener("input", (e) => {
+      seekToTime(parseFloat(e.target.value));
+    });
+
+    document.getElementById("btnSound").addEventListener("click", () => {
+      initAudio();
+      audioEnabled = !audioEnabled;
+      document.getElementById("soundIcon").innerText = audioEnabled ? "🔊" : "🔇";
+      document.getElementById("soundLabel").innerText = audioEnabled ? "Sound On" : "Muted";
+    });
+
+    // --- 1-Click Video Recording & Export ---
+    async function recordAndDownload() {
+      const exportBtn = document.getElementById("btnExport");
+      const exportText = document.getElementById("exportText");
+      const badge = document.getElementById("recordingBadge");
+
+      exportBtn.disabled = true;
+      exportText.innerText = "Recording at 60 FPS...";
+      badge.classList.remove("hidden");
+
+      restartDemo();
+
+      const stream = canvas.captureStream(60);
+      const mimeType = MediaRecorder.isTypeSupported("video/webm; codecs=vp9") ? "video/webm; codecs=vp9" : "video/webm";
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 10000000 });
+      const chunks = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `scanspace-apple-demo-${Date.now()}.webm`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        exportBtn.disabled = false;
+        exportText.innerText = "Export Demo Video (.webm)";
+        badge.classList.add("hidden");
+      };
+
+      recorder.start();
+
+      // Stop recorder when video finishes
+      const checkInterval = setInterval(() => {
+        if (currentTime >= TOTAL_DURATION) {
+          clearInterval(checkInterval);
+          recorder.stop();
+        }
+      }, 200);
+    }
+  </script>
+</body>
+</html>
